@@ -27,10 +27,14 @@ except Exception:
 
 # NVIDIA NVML
 try:
-    import nvidia_ml_py3 as pynvml
+    import pynvml
     HAVE_NVML = True
 except Exception:
-    HAVE_NVML = False
+    try:
+        import nvidia_ml_py3 as pynvml
+        HAVE_NVML = True
+    except Exception:
+        HAVE_NVML = False
 
 # LEVIT SHAPE RESET
 try:
