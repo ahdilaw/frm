@@ -58,56 +58,86 @@ download_data_models() {
   
   log "📥 Downloading data and models archive…"
   
-  # Google Drive large file download (handles confirmation page)
+  # Google Drive large file download (bypasses virus scan warning)
   FILE_ID="195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
+  DOWNLOAD_SUCCESS=0
   
-  if command -v wget >/dev/null 2>&1; then
-    # Try direct download first (works for smaller files)
-    wget --progress=bar:force:noscroll --no-check-certificate \
-      "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-      -O "$ROOT/$DATA_ARCHIVE_NAME" 2>/dev/null || {
-      
-      log "Direct download failed, trying with confirmation handling..."
-      # Get confirmation token for large files
-      wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate \
-        "https://drive.google.com/uc?export=download&id=$FILE_ID" -O- | \
-        sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p' > /tmp/confirm.txt 2>/dev/null || true
-      
-      if [ -s /tmp/confirm.txt ]; then
-        CONFIRM=$(cat /tmp/confirm.txt)
-        wget --load-cookies /tmp/cookies.txt --progress=bar:force:noscroll \
-          "https://drive.google.com/uc?export=download&confirm=$CONFIRM&id=$FILE_ID" \
-          -O "$ROOT/$DATA_ARCHIVE_NAME" || {
-          warn "wget download failed completely"
-          rm -f /tmp/cookies.txt /tmp/confirm.txt
-          return 1
-        }
-      else
-        warn "Could not get confirmation token"
-        rm -f /tmp/cookies.txt /tmp/confirm.txt
-        return 1
-      fi
-      
-      rm -f /tmp/cookies.txt /tmp/confirm.txt
-    }
+  # Method 1: Try gdown (best for Google Drive large files)
+  if command -v python3 >/dev/null 2>&1; then
+    log "Trying download with gdown (bypasses virus scan)..."
+    python3 -m pip install -q gdown 2>/dev/null || true
+    if python3 -c "import gdown" 2>/dev/null; then
+      python3 -c "
+import gdown
+import sys
+try:
+    gdown.download('https://drive.google.com/uc?id=$FILE_ID', '$ROOT/$DATA_ARCHIVE_NAME', quiet=False, fuzzy=True)
+    print('gdown success')
+    sys.exit(0)
+except Exception as e:
+    print(f'gdown failed: {e}')
+    sys.exit(1)
+" && DOWNLOAD_SUCCESS=1
+    fi
+  fi
+  
+  # Method 2: Direct approach with virus scan bypass
+  if [ $DOWNLOAD_SUCCESS -eq 0 ] && command -v wget >/dev/null 2>&1; then
+    log "Trying wget with virus scan bypass..."
     
-  elif command -v curl >/dev/null 2>&1; then
-    # Try direct download with curl
+    # Use the direct download URL that bypasses virus scan
+    wget --progress=bar:force:noscroll --no-check-certificate \
+      --header="User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36" \
+      "https://drive.usercontent.google.com/download?id=$FILE_ID&export=download&authuser=0&confirm=t" \
+      -O "$ROOT/$DATA_ARCHIVE_NAME" && DOWNLOAD_SUCCESS=1
+      
+    # If that fails, try the alternative usercontent URL
+    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
+      wget --progress=bar:force:noscroll --no-check-certificate \
+        --header="User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36" \
+        "https://drive.usercontent.google.com/u/0/uc?id=$FILE_ID&export=download" \
+        -O "$ROOT/$DATA_ARCHIVE_NAME" && DOWNLOAD_SUCCESS=1
+    fi
+  fi
+  
+  # Method 3: curl with virus scan bypass  
+  if [ $DOWNLOAD_SUCCESS -eq 0 ] && command -v curl >/dev/null 2>&1; then
+    log "Trying curl with virus scan bypass..."
+    
     curl -L --progress-bar \
-      "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-      -o "$ROOT/$DATA_ARCHIVE_NAME" || {
-      warn "curl download failed"
-      return 1
-    }
-  else
-    warn "Neither wget nor curl available. Please install one or download manually."
-    warn "Manual download: https://drive.google.com/file/d/$FILE_ID/view"
+      -H "User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36" \
+      "https://drive.usercontent.google.com/download?id=$FILE_ID&export=download&authuser=0&confirm=t" \
+      -o "$ROOT/$DATA_ARCHIVE_NAME" && DOWNLOAD_SUCCESS=1
+      
+    # Alternative curl method
+    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
+      curl -L --progress-bar \
+        -H "User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36" \
+        "https://drive.usercontent.google.com/u/0/uc?id=$FILE_ID&export=download" \
+        -o "$ROOT/$DATA_ARCHIVE_NAME" && DOWNLOAD_SUCCESS=1
+    fi
+  fi
+  
+  # Check if any method succeeded
+  if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
+    warn "All download methods failed. The file may require manual download due to Google Drive restrictions."
+    warn "Please download manually from: https://drive.google.com/file/d/$FILE_ID/view"
+    warn "Click 'Download anyway' when prompted about virus scan, then save as: $ROOT/$DATA_ARCHIVE_NAME"
     return 1
   fi
   
   # Verify download size (should be much larger than 100KB)
   if [ -f "$ROOT/$DATA_ARCHIVE_NAME" ]; then
     FILE_SIZE=$(stat -c%s "$ROOT/$DATA_ARCHIVE_NAME" 2>/dev/null || echo "0")
+    if [ "$FILE_SIZE" -lt 100000 ]; then
+      warn "Downloaded file is too small ($FILE_SIZE bytes). Likely got HTML confirmation page."
+      warn "Please try downloading manually from: https://drive.google.com/file/d/$FILE_ID/view"
+      rm -f "$ROOT/$DATA_ARCHIVE_NAME"
+      return 1
+    else
+      log "✅ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
+    fi
+  fi
     if [ "$FILE_SIZE" -lt 100000 ]; then
       warn "Downloaded file is too small ($FILE_SIZE bytes). Likely got HTML confirmation page."
       warn "Please try downloading manually from: https://drive.google.com/file/d/$FILE_ID/view"
