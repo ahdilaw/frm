@@ -904,8 +904,6 @@ def evaluate_model(
                 host_j = w_en.get("host_pkg_j", math.nan)
                 dram_j = w_en.get("host_dram_j", math.nan)
                 gpu_j  = w_en.get("gpu_j", math.nan)
-                tot_j  = float(np.nansum([host_j, dram_j, gpu_j]))
-                batch_energy_total_j.append(tot_j)
                 batch_energy_host_j.append(host_j)
                 batch_energy_gpu_j.append(gpu_j)
                 batch_energy_dram_j.append(dram_j)
@@ -955,30 +953,46 @@ def evaluate_model(
             per_sample_latency_ms.extend([per_item] * len(chunk))
             per_sample_throughput_sps.extend([sps] * len(chunk))
 
-        if es and batch_energy_total_j:
-            # median across repeats
-            med_tot_j   = float(np.nanmedian(batch_energy_total_j)) if any(np.isfinite(batch_energy_total_j)) else math.nan
-            med_host_j  = float(np.nanmedian(batch_energy_host_j)) if any(np.isfinite(batch_energy_host_j)) else math.nan
-            med_gpu_j   = float(np.nanmedian(batch_energy_gpu_j)) if any(np.isfinite(batch_energy_gpu_j)) else math.nan
-            med_dram_j  = float(np.nanmedian(batch_energy_dram_j)) if any(np.isfinite(batch_energy_dram_j)) else math.nan
-            # per‑sample energy
-            e_per_samp  = med_tot_j / len(chunk) if len(chunk) and np.isfinite(med_tot_j) else math.nan
-            e_host_samp = med_host_j / len(chunk) if len(chunk) and np.isfinite(med_host_j) else math.nan
-            e_gpu_samp  = med_gpu_j / len(chunk) if len(chunk) and np.isfinite(med_gpu_j) else math.nan
-            e_dram_samp = med_dram_j / len(chunk) if len(chunk) and np.isfinite(med_dram_j) else math.nan
-            # power profile per window (use medians of repeat‑level stats)
+        if es and batch_energy_gpu_j:
+            # Process energy like PyTorch script - simpler approach
+            host_j_med = float(np.nanmedian(batch_energy_host_j)) if batch_energy_host_j and any(np.isfinite(batch_energy_host_j)) else math.nan
+            gpu_j_med = float(np.nanmedian(batch_energy_gpu_j)) if batch_energy_gpu_j and any(np.isfinite(batch_energy_gpu_j)) else math.nan
+            dram_j_med = float(np.nanmedian(batch_energy_dram_j)) if batch_energy_dram_j and any(np.isfinite(batch_energy_dram_j)) else math.nan
+            
+            # Total energy (sum available components)
+            total_j_components = []
+            if not math.isnan(host_j_med):
+                total_j_components.append(host_j_med)
+            if not math.isnan(gpu_j_med):
+                total_j_components.append(gpu_j_med)
+            if not math.isnan(dram_j_med):
+                total_j_components.append(dram_j_med)
+            total_j = sum(total_j_components) if total_j_components else math.nan
+            
+            # Convert batch energy to per-sample energy
+            e_per_samp = total_j / len(chunk) if len(chunk) and not math.isnan(total_j) else math.nan
+            e_host_samp = host_j_med / len(chunk) if len(chunk) and not math.isnan(host_j_med) else math.nan
+            e_gpu_samp = gpu_j_med / len(chunk) if len(chunk) and not math.isnan(gpu_j_med) else math.nan
+            e_dram_samp = dram_j_med / len(chunk) if len(chunk) and not math.isnan(dram_j_med) else math.nan
+            
+            # GPU power stats (median across repeats)
             gpu_pw_mean = float(np.nanmedian(batch_gpu_power_means)) if batch_gpu_power_means and any(np.isfinite(batch_gpu_power_means)) else math.nan
-            gpu_pw_med  = float(np.nanmedian(batch_gpu_power_medians)) if batch_gpu_power_medians and any(np.isfinite(batch_gpu_power_medians)) else math.nan
-            gpu_pw_std  = float(np.nanmedian(batch_gpu_power_stds)) if batch_gpu_power_stds and any(np.isfinite(batch_gpu_power_stds)) else math.nan
-            gpu_pw_p90  = float(np.nanmedian(batch_gpu_power_p90s)) if batch_gpu_power_p90s and any(np.isfinite(batch_gpu_power_p90s)) else math.nan
-            gpu_pw_p95  = float(np.nanmedian(batch_gpu_power_p95s)) if batch_gpu_power_p95s and any(np.isfinite(batch_gpu_power_p95s)) else math.nan
-            gpu_pw_p99  = float(np.nanmedian(batch_gpu_power_p99s)) if batch_gpu_power_p99s and any(np.isfinite(batch_gpu_power_p99s)) else math.nan
+            gpu_pw_med = float(np.nanmedian(batch_gpu_power_medians)) if batch_gpu_power_medians and any(np.isfinite(batch_gpu_power_medians)) else math.nan
+            gpu_pw_std = float(np.nanmedian(batch_gpu_power_stds)) if batch_gpu_power_stds and any(np.isfinite(batch_gpu_power_stds)) else math.nan
+            gpu_pw_p90 = float(np.nanmedian(batch_gpu_power_p90s)) if batch_gpu_power_p90s and any(np.isfinite(batch_gpu_power_p90s)) else math.nan
+            gpu_pw_p95 = float(np.nanmedian(batch_gpu_power_p95s)) if batch_gpu_power_p95s and any(np.isfinite(batch_gpu_power_p95s)) else math.nan
+            gpu_pw_p99 = float(np.nanmedian(batch_gpu_power_p99s)) if batch_gpu_power_p99s and any(np.isfinite(batch_gpu_power_p99s)) else math.nan
 
-            # J/GFLOP if available
+            # Energy per GFLOP
             model_gflops = None
             if gflops_map is not None:
                 model_gflops = gflops_map.get(model_name) or gflops_map.get(os.path.splitext(model_name)[0])
-            e_per_gflop = (e_per_samp / model_gflops) if (model_gflops and model_gflops > 0) else math.nan
+            
+            if model_gflops and model_gflops > 0 and not math.isnan(e_per_samp):
+                gflops_per_sample = model_gflops / len(chunk)
+                e_per_gflop = e_per_samp / gflops_per_sample if gflops_per_sample > 0 else math.nan
+            else:
+                e_per_gflop = math.nan
 
             per_sample_energy_j.extend([e_per_samp] * len(chunk))
             per_sample_energy_host_j.extend([e_host_samp] * len(chunk))
