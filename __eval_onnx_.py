@@ -329,8 +329,7 @@ class NVMLPower:
             total_mw = 0
             for h in self.handles:
                 mw = pynvml.nvmlDeviceGetPowerUsage(h)  # milliwatts
-                if mw is not None and mw != pynvml.NVML_VALUE_NOT_AVAILABLE:
-                    total_mw += int(mw)
+                total_mw += int(mw)
             return (total_mw / 1000.0)
         except Exception:
             return None
@@ -858,10 +857,6 @@ def evaluate_model(
         w_en  = es.stop() if es else {}
         
         # Debug energy results
-        if es:
-            print(f"DEBUG: EnergySampler exists, w_en = {w_en}")
-            print(f"DEBUG: w_en type = {type(w_en)}, bool = {bool(w_en)}")
-        
         return (t1 - t0) / 1e6, w_mem, w_en  # ms, mem window, energy window
 
     def _warmup(chunk: np.ndarray, n: int):
