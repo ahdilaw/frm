@@ -856,6 +856,12 @@ def evaluate_model(
         t1 = time.perf_counter_ns()
         w_mem = sampler.stop() if sampler else {}
         w_en  = es.stop() if es else {}
+        
+        # Debug energy results
+        if es:
+            print(f"DEBUG: EnergySampler exists, w_en = {w_en}")
+            print(f"DEBUG: w_en type = {type(w_en)}, bool = {bool(w_en)}")
+        
         return (t1 - t0) / 1e6, w_mem, w_en  # ms, mem window, energy window
 
     def _warmup(chunk: np.ndarray, n: int):
