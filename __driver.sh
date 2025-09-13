@@ -5,7 +5,7 @@ set -euo pipefail
 trap 'echo -e "[\e[31m$(date +'%H:%M:%S')\e[0m] ❌ Error on line $LINENO"; exit 1' ERR
 
 # --- Configuration ---
-DATA_ARCHIVE_URL=""  # Will be set after Google Drive link is provided
+DATA_ARCHIVE_URL="https://drive.google.com/uc?export=download&id=195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
 DATA_ARCHIVE_NAME="frm_code_static_250913.tar.gz"
 
 # --- Parse args ---
@@ -56,7 +56,7 @@ download_data_models() {
     return 1
   fi
   
-  log "📥 Downloading data and models archive…"
+  log "Downloading data and models archive…"
   
   # Download with wget (supports Google Drive direct links)
   if command -v wget >/dev/null 2>&1; then
@@ -85,13 +85,13 @@ download_data_models() {
   
   # Verify extraction
   if [ -d "$ROOT/data" ] && [ -d "$ROOT/models" ]; then
-    log "✅ Data and models extracted successfully"
-    log "🗂️  Data samples: $(find "$ROOT/data" -name "*.JPEG" 2>/dev/null | wc -l || echo "unknown")"
-    log "🧠 Model files: $(find "$ROOT/models" -type f 2>/dev/null | wc -l || echo "unknown")"
+    log "Data and models extracted successfully"
+    log "Data samples: $(find "$ROOT/data" -name "*.JPEG" 2>/dev/null | wc -l || echo "unknown")"
+    log "Model files: $(find "$ROOT/models" -type f 2>/dev/null | wc -l || echo "unknown")"
     
     # Clean up archive
     rm -f "$ROOT/$DATA_ARCHIVE_NAME"
-    log "🧹 Cleaned up archive file"
+    log "Cleaned up archive file"
   else
     warn "Extraction verification failed. Expected data/ and models/ directories."
     return 1
@@ -386,5 +386,5 @@ fi
 
 log "Packaging results…"
 tar -C "$RUN_DIR" -czf "$ROOT/results_$TS.tar.gz" provenance logs results
-log "✅ Paper-grade benchmark complete: $ROOT/results_$TS.tar.gz"
-log "📊 Benchmark configuration: warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference (bs=1)"
+log "Paper-grade benchmark complete: $ROOT/results_$TS.tar.gz"
+log "Benchmark configuration: warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference (bs=1)"
