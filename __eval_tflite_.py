@@ -87,22 +87,12 @@ try:
     import tensorflow as tf
     TF_AVAILABLE = True
     
-    # Try different TensorFlow Lite import paths
+    # Try different TensorFlow Lite import paths (Method 1 works in TF 2.20.0)
     Interpreter = None
     if hasattr(tf, 'lite') and hasattr(tf.lite, 'Interpreter'):
         Interpreter = tf.lite.Interpreter
-    elif hasattr(tf, 'compat') and hasattr(tf.compat, 'v1') and hasattr(tf.compat.v1, 'lite'):
-        Interpreter = tf.compat.v1.lite.Interpreter
-    else:
-        # Try direct import as fallback
-        try:
-            from tensorflow.lite import Interpreter  # type: ignore
-        except ImportError:
-            Interpreter = None
-    
-    if Interpreter is not None:
         RUNTIME = "tensorflow.lite"
-        print(f"✓ Successfully imported full TensorFlow with TensorFlow Lite")
+        print(f"✓ Successfully imported full TensorFlow {tf.__version__} with TensorFlow Lite")
         
         # Check for GPU availability
         try:
@@ -115,15 +105,21 @@ try:
         except Exception as gpu_e:
             print(f"✓ GPU check failed: {gpu_e} - using CPU only")
     else:
-        raise ImportError("TensorFlow Lite Interpreter not found in any expected location")
+        # Try compatibility layer as fallback
+        if hasattr(tf, 'compat') and hasattr(tf.compat, 'v1') and hasattr(tf.compat.v1, 'lite'):
+            Interpreter = tf.compat.v1.lite.Interpreter
+            RUNTIME = "tensorflow.lite"
+            print(f"✓ Successfully imported TensorFlow {tf.__version__} via compat layer")
+        else:
+            raise ImportError("TensorFlow Lite Interpreter not found in any expected location")
         
 except ImportError as tf_e:
     print(f"✗ Could not import full TensorFlow: {tf_e}")
+    TF_AVAILABLE = False
     # Fallback to tflite_runtime (CPU only, no Flex delegate)
     try:
         from tflite_runtime.interpreter import Interpreter  # type: ignore
         RUNTIME = "tflite_runtime"
-        TF_AVAILABLE = False
         print(f"✓ Successfully imported tflite_runtime (CPU only, no Flex delegate)")
         print(f"✓ Limited compatibility - some models may fail (install tensorflow for full support)")
     except ImportError as e:
