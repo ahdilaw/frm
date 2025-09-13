@@ -2,8 +2,12 @@
 # type: ignore
 # Usage: python __eval_onnx_.py [--latency] [--lat-warmup-batches n] [--lat-repeats-batch n] [--bs n] [--blaze] [--mem] [--mem-sample-hz HZ] [--energy] [--energy-sample-hz HZ] [--gflops-map path/to/csv]
 
-import os, json, random, platform, argparse, time, math, threading, csv
+import os, json, random, platform, argparse, time, math, threading, csv, warnings
 from typing import List, Tuple, Optional, Dict, Any
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*")
 
 import numpy as np
 import pandas as pd
@@ -23,7 +27,7 @@ except Exception:
 
 # NVIDIA NVML
 try:
-    import pynvml
+    import nvidia_ml_py3 as pynvml
     HAVE_NVML = True
 except Exception:
     HAVE_NVML = False
@@ -197,8 +201,8 @@ def simplify_if_needed(model_path: str, fname: str, input_size: int = 224) -> Op
 def select_ort_providers() -> Tuple[List[str], str]:
     avail = ort.get_available_providers()
     prefs = [
+        ("CUDAExecutionProvider", "CUDA"),  # Prioritize CUDA over TensorRT to avoid library issues
         ("TensorrtExecutionProvider", "TensorRT"),
-        ("CUDAExecutionProvider", "CUDA"),
         ("ROCMExecutionProvider", "ROCm"),
         ("DmlExecutionProvider", "DirectML"),
         ("OpenVINOExecutionProvider", "OpenVINO"),
@@ -734,11 +738,34 @@ def evaluate_model(
     Returns per‑sample DF, accs, mem_meta, energy_meta.
     """
     onnx_bytes = simplify_if_needed(model_path, model_name, 224)
-    try:
-        session = ort.InferenceSession(onnx_bytes or model_path, providers=providers, sess_options=ort.SessionOptions())
-    except Exception:
-        so = ort.SessionOptions(); so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-        session = ort.InferenceSession(onnx_bytes or model_path, providers=providers, sess_options=so)
+    
+    # Try creating session with preferred providers, fallback gracefully on errors
+    session = None
+    original_providers = providers.copy()
+    
+    for attempt, provider_list in enumerate([providers, ["CUDAExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]]):
+        try:
+            if attempt == 0:
+                session = ort.InferenceSession(onnx_bytes or model_path, providers=provider_list, sess_options=ort.SessionOptions())
+            else:
+                # Suppress provider error messages for fallback attempts
+                so = ort.SessionOptions()
+                so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+                so.log_severity_level = 3  # Only show fatal errors
+                session = ort.InferenceSession(onnx_bytes or model_path, providers=provider_list, sess_options=so)
+            
+            # If we get here, session creation was successful
+            if attempt > 0:
+                actual_providers = session.get_providers()
+                print(f"[System] Fell back to providers: {actual_providers}")
+            break
+            
+        except Exception as e:
+            if attempt == 2:  # Last attempt failed
+                raise RuntimeError(f"Failed to create ONNX Runtime session with all provider options: {e}")
+            elif attempt == 0 and "TensorRT" in str(e):
+                print(f"[System] TensorRT provider failed, falling back to CUDA/CPU")
+            continue
 
     # Memory sampler + baselines
     sampler = MemorySampler(hz=mem_hz, provider_label=provider_label) if do_mem else None
@@ -926,22 +953,22 @@ def evaluate_model(
 
         if es and batch_energy_total_j:
             # median across repeats
-            med_tot_j   = float(np.nanmedian(batch_energy_total_j))
-            med_host_j  = float(np.nanmedian(batch_energy_host_j))
-            med_gpu_j   = float(np.nanmedian(batch_energy_gpu_j))
+            med_tot_j   = float(np.nanmedian(batch_energy_total_j)) if any(np.isfinite(batch_energy_total_j)) else math.nan
+            med_host_j  = float(np.nanmedian(batch_energy_host_j)) if any(np.isfinite(batch_energy_host_j)) else math.nan
+            med_gpu_j   = float(np.nanmedian(batch_energy_gpu_j)) if any(np.isfinite(batch_energy_gpu_j)) else math.nan
             med_dram_j  = float(np.nanmedian(batch_energy_dram_j)) if any(np.isfinite(batch_energy_dram_j)) else math.nan
             # per‑sample energy
-            e_per_samp  = med_tot_j / len(chunk) if len(chunk) else math.nan
-            e_host_samp = med_host_j / len(chunk) if len(chunk) else math.nan
-            e_gpu_samp  = med_gpu_j / len(chunk) if len(chunk) else math.nan
-            e_dram_samp = med_dram_j / len(chunk) if len(chunk) else math.nan
+            e_per_samp  = med_tot_j / len(chunk) if len(chunk) and np.isfinite(med_tot_j) else math.nan
+            e_host_samp = med_host_j / len(chunk) if len(chunk) and np.isfinite(med_host_j) else math.nan
+            e_gpu_samp  = med_gpu_j / len(chunk) if len(chunk) and np.isfinite(med_gpu_j) else math.nan
+            e_dram_samp = med_dram_j / len(chunk) if len(chunk) and np.isfinite(med_dram_j) else math.nan
             # power profile per window (use medians of repeat‑level stats)
-            gpu_pw_mean = float(np.nanmedian(batch_gpu_power_means)) if batch_gpu_power_means else math.nan
-            gpu_pw_med  = float(np.nanmedian(batch_gpu_power_medians)) if batch_gpu_power_medians else math.nan
-            gpu_pw_std  = float(np.nanmedian(batch_gpu_power_stds)) if batch_gpu_power_stds else math.nan
-            gpu_pw_p90  = float(np.nanmedian(batch_gpu_power_p90s)) if batch_gpu_power_p90s else math.nan
-            gpu_pw_p95  = float(np.nanmedian(batch_gpu_power_p95s)) if batch_gpu_power_p95s else math.nan
-            gpu_pw_p99  = float(np.nanmedian(batch_gpu_power_p99s)) if batch_gpu_power_p99s else math.nan
+            gpu_pw_mean = float(np.nanmedian(batch_gpu_power_means)) if batch_gpu_power_means and any(np.isfinite(batch_gpu_power_means)) else math.nan
+            gpu_pw_med  = float(np.nanmedian(batch_gpu_power_medians)) if batch_gpu_power_medians and any(np.isfinite(batch_gpu_power_medians)) else math.nan
+            gpu_pw_std  = float(np.nanmedian(batch_gpu_power_stds)) if batch_gpu_power_stds and any(np.isfinite(batch_gpu_power_stds)) else math.nan
+            gpu_pw_p90  = float(np.nanmedian(batch_gpu_power_p90s)) if batch_gpu_power_p90s and any(np.isfinite(batch_gpu_power_p90s)) else math.nan
+            gpu_pw_p95  = float(np.nanmedian(batch_gpu_power_p95s)) if batch_gpu_power_p95s and any(np.isfinite(batch_gpu_power_p95s)) else math.nan
+            gpu_pw_p99  = float(np.nanmedian(batch_gpu_power_p99s)) if batch_gpu_power_p99s and any(np.isfinite(batch_gpu_power_p99s)) else math.nan
 
             # J/GFLOP if available
             model_gflops = None

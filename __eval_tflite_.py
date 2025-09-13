@@ -7,12 +7,16 @@ import argparse
 import json
 import os
 import platform
+import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import math
 import time
 import threading
 import random
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*")
 
 # Platform-specific imports
 try:
@@ -38,7 +42,7 @@ except Exception:
 
 # NVIDIA NVML
 try:
-    import pynvml
+    import nvidia_ml_py3 as pynvml
     HAVE_NVML = True
 except Exception:
     HAVE_NVML = False
@@ -107,6 +111,15 @@ except ImportError as e:
         RUNTIME = None
         _IMPORT_ERR = f"tflite_runtime: {e}, tensorflow.lite: {e2}"
         print(f"✗ No TFLite backend available: {_IMPORT_ERR}")
+
+# Early exit if no interpreter is available
+if Interpreter is None:
+    print(f"❌ Error: No TensorFlow Lite interpreter available.")
+    print(f"   Please install one of the following:")
+    print(f"   - tflite-runtime: pip install tflite-runtime")
+    print(f"   - tensorflow: pip install tensorflow")
+    import sys
+    sys.exit(1)
 
 # --- Config ---
 DATA_DIR = Path("data")

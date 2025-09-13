@@ -12,7 +12,11 @@ import random
 import re
 import threading
 import time
+import warnings
 from pathlib import Path
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*")
 from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
@@ -40,7 +44,7 @@ except Exception:
 
 # NVIDIA NVML
 try:
-    import pynvml
+    import nvidia_ml_py3 as pynvml
     HAVE_NVML = True
 except Exception:
     HAVE_NVML = False

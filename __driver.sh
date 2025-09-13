@@ -218,7 +218,7 @@ else
   "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
 fi
 # ONNX stack
-"$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17" "pynvml"
+"$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17" "nvidia-ml-py3"
 # Optional
 "$VENV_OX/bin/pip" install $PIP_OPTS timm || true
 
@@ -226,7 +226,7 @@ fi
 log "Creating TFLite/TF env…"
 python3 -m venv "$VENV_TFL"
 "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-"$VENV_TFL/bin/pip" install $PIP_OPTS "numpy>=1.21.0,<2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0" "pynvml"
+"$VENV_TFL/bin/pip" install $PIP_OPTS "numpy>=1.21.0,<2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0" "nvidia-ml-py3"
 
 # torchvision (for transforms) — light use only
 if [ $HAS_NVIDIA -eq 1 ]; then
@@ -292,7 +292,7 @@ out["cpu_governors"]=govs
 out["meminfo"]=sh("cat /proc/meminfo")
 out["lspci_vga"]=sh("lspci | grep -i -E 'vga|3d|display'")
 try:
-  import pynvml
+  import nvidia_ml_py3 as pynvml
   pynvml.nvmlInit()
   n=pynvml.nvmlDeviceGetCount()
   g=[]
