@@ -228,23 +228,29 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
             # Create GPU delegate - handle TensorFlow 2.20.0+ API changes
             gpu_delegate = None
             try:
-                # Try new API path (TensorFlow 2.20.0+)
+                # Method 1: Try legacy API (TF < 2.20)
                 gpu_delegate = tf.lite.experimental.GpuDelegate(
                     options={'precision_loss_allowed': True}
                 )
+                print(f"[GPU] Using legacy GpuDelegate API")
             except AttributeError:
                 try:
-                    # Try alternative API paths for newer versions
-                    from tensorflow.lite.python.interpreter import GpuDelegate
-                    gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
-                except ImportError:
+                    # Method 2: Try new load_delegate API (TF 2.20+)
+                    gpu_delegate = tf.lite.experimental.load_delegate('libdelegate_gpu.so')
+                    print(f"[GPU] Using new load_delegate API")
+                except Exception as load_e:
                     try:
-                        # Try importing from different module
-                        from tensorflow.lite.experimental import GpuDelegate
-                        gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
-                    except ImportError:
-                        print(f"[GPU-SKIP] {Path(model_path).name} - GPU delegate not available in this TensorFlow version")
-                        raise AttributeError("GPU delegate not found")
+                        # Method 3: Try GPU delegate library without .so extension
+                        gpu_delegate = tf.lite.experimental.load_delegate('libdelegate_gpu')
+                        print(f"[GPU] Using load_delegate without .so extension")
+                    except Exception as load_e2:
+                        try:
+                            # Method 4: Try different GPU delegate library name
+                            gpu_delegate = tf.lite.experimental.load_delegate('gpu_delegate')
+                            print(f"[GPU] Using gpu_delegate library name")
+                        except Exception as load_e3:
+                            print(f"[GPU-SKIP] {Path(model_path).name} - GPU delegate not available: {load_e3}")
+                            raise AttributeError("GPU delegate not found in any form")
             
             if gpu_delegate is not None:
                 interp = tf.lite.Interpreter(
@@ -291,19 +297,29 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                             # Try different GPU delegate API paths for TensorFlow 2.20.0+
                             gpu_delegate = None
                             try:
+                                # Method 1: Try legacy API (TF < 2.20)
                                 gpu_delegate = tf.lite.experimental.GpuDelegate(
                                     options={'precision_loss_allowed': True}
                                 )
+                                print(f"[FLEX-GPU] Using legacy GpuDelegate API")
                             except AttributeError:
                                 try:
-                                    from tensorflow.lite.python.interpreter import GpuDelegate
-                                    gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
-                                except ImportError:
+                                    # Method 2: Try new load_delegate API (TF 2.20+)
+                                    gpu_delegate = tf.lite.experimental.load_delegate('libdelegate_gpu.so')
+                                    print(f"[FLEX-GPU] Using new load_delegate API")
+                                except Exception as load_e:
                                     try:
-                                        from tensorflow.lite.experimental import GpuDelegate
-                                        gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
-                                    except ImportError:
-                                        gpu_delegate = None
+                                        # Method 3: Try GPU delegate library without .so extension
+                                        gpu_delegate = tf.lite.experimental.load_delegate('libdelegate_gpu')
+                                        print(f"[FLEX-GPU] Using load_delegate without .so extension")
+                                    except Exception as load_e2:
+                                        try:
+                                            # Method 4: Try different GPU delegate library name
+                                            gpu_delegate = tf.lite.experimental.load_delegate('gpu_delegate')
+                                            print(f"[FLEX-GPU] Using gpu_delegate library name")
+                                        except Exception as load_e3:
+                                            print(f"[FLEX-GPU-SKIP] GPU delegate not available: {load_e3}")
+                                            gpu_delegate = None
                             
                             if gpu_delegate is not None:
                                 delegates.append(gpu_delegate)
