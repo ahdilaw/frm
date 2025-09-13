@@ -56,7 +56,7 @@ download_data_models() {
     return 1
   fi
   
-  log "📥 Downloading data and models archive…"
+  log "Downloading data and models archive…"
   
   # Google Drive large file download (bypasses virus scan warning)
   FILE_ID="195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
@@ -135,11 +135,11 @@ except Exception as e:
       rm -f "$ROOT/$DATA_ARCHIVE_NAME"
       return 1
     else
-      log "✅ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
+      log "Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
     fi
   fi
   
-  log "📦 Extracting data and models…"
+  log "Extracting data and models…"
   tar -xzf "$ROOT/$DATA_ARCHIVE_NAME" -C "$ROOT" || {
     warn "Extraction failed. Archive may be corrupted."
     return 1
