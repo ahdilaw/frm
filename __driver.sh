@@ -1,86 +1,8 @@
 #!/usr/bin/env bash
 # Usage: bash __driver.sh [--blaze]
-se  log "📥 Downloading data and models archive…"
-  
-  # Google Drive large file download (handles confirmation page)
-  FILE_ID="195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
-  
-  if command -v wget >/dev/null 2>&1; then
-    # First, get the confirmation token
-    wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate \
-      "https://drive.google.com/uc?export=download&id=$FILE_ID" -O- | \
-      sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p' > /tmp/confirm.txt
-    
-    # Download with confirmation token
-    if [ -s /tmp/confirm.txt ]; then
-      CONFIRM=$(cat /tmp/confirm.txt)
-      wget --load-cookies /tmp/cookies.txt --progress=bar:force:noscroll \
-        "https://drive.google.com/uc?export=download&confirm=$CONFIRM&id=$FILE_ID" \
-        -O "$ROOT/$DATA_ARCHIVE_NAME" || {
-        warn "wget download with confirmation failed, trying alternative method..."
-        wget --progress=bar:force:noscroll --no-check-certificate \
-          "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-          -O "$ROOT/$DATA_ARCHIVE_NAME" || {
-          warn "wget download failed completely"
-          return 1
-        }
-      }
-    else
-      # Try direct download without confirmation
-      wget --progress=bar:force:noscroll --no-check-certificate \
-        "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-        -O "$ROOT/$DATA_ARCHIVE_NAME" || {
-        warn "wget direct download failed"
-        return 1
-      }
-    fi
-    
-    # Cleanup
-    rm -f /tmp/cookies.txt /tmp/confirm.txt
-    
-  elif command -v curl >/dev/null 2>&1; then
-    # Try curl with confirmation bypass
-    curl -L --progress-bar --cookie-jar /tmp/cookies.txt \
-      "https://drive.google.com/uc?export=download&id=$FILE_ID" \
-      -o /tmp/intermezzo.html
-    
-    CONFIRM=$(cat /tmp/intermezzo.html | grep -o 'confirm=[^&]*' | sed 's/confirm=//')
-    
-    if [ ! -z "$CONFIRM" ]; then
-      curl -L --progress-bar --cookie /tmp/cookies.txt \
-        "https://drive.google.com/uc?export=download&confirm=$CONFIRM&id=$FILE_ID" \
-        -o "$ROOT/$DATA_ARCHIVE_NAME" || {
-        warn "curl download failed"
-        return 1
-      }
-    else
-      curl -L --progress-bar \
-        "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-        -o "$ROOT/$DATA_ARCHIVE_NAME" || {
-        warn "curl direct download failed"
-        return 1
-      }
-    fi
-    
-    # Cleanup
-    rm -f /tmp/cookies.txt /tmp/intermezzo.html
-    
-  else
-    warn "Neither wget nor curl available. Please install one or download manually."
-    return 1
-  fi
-  
-  # Verify download size (should be much larger than 100KB)
-  if [ -f "$ROOT/$DATA_ARCHIVE_NAME" ]; then
-    FILE_SIZE=$(stat -c%s "$ROOT/$DATA_ARCHIVE_NAME" 2>/dev/null || echo "0")
-    if [ "$FILE_SIZE" -lt 100000 ]; then
-      warn "Downloaded file is too small ($FILE_SIZE bytes). Likely got HTML confirmation page."
-      warn "Please try downloading manually from: https://drive.google.com/file/d/$FILE_ID/view"
-      return 1
-    else
-      log "✓ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
-    fi
-  fip 'echo -e "[\e[31m$(date +'%H:%M:%S')\e[0m] ❌ Error on line $LINENO"; exit 1' ERR
+set -euo pipefail
+
+trap 'echo -e "[\e[31m$(date +'%H:%M:%S')\e[0m] ❌ Error on line $LINENO"; exit 1' ERR
 
 # --- Configuration ---
 DATA_ARCHIVE_URL="https://drive.google.com/uc?export=download&id=195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
@@ -134,25 +56,66 @@ download_data_models() {
     return 1
   fi
   
-  log "Downloading data and models archive…"
+  log "📥 Downloading data and models archive…"
   
-  # Download with wget (supports Google Drive direct links)
+  # Google Drive large file download (handles confirmation page)
+  FILE_ID="195tP6tB4qTbaMxmP3tic7LxsrvDpP2ZW"
+  
   if command -v wget >/dev/null 2>&1; then
-    wget --progress=bar:force:noscroll -O "$ROOT/$DATA_ARCHIVE_NAME" "$DATA_ARCHIVE_URL" || {
-      warn "wget download failed, trying curl..."
-      curl -L -o "$ROOT/$DATA_ARCHIVE_NAME" "$DATA_ARCHIVE_URL" || {
-        warn "Download failed. Please download $DATA_ARCHIVE_NAME manually."
+    # Try direct download first (works for smaller files)
+    wget --progress=bar:force:noscroll --no-check-certificate \
+      "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
+      -O "$ROOT/$DATA_ARCHIVE_NAME" 2>/dev/null || {
+      
+      log "Direct download failed, trying with confirmation handling..."
+      # Get confirmation token for large files
+      wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate \
+        "https://drive.google.com/uc?export=download&id=$FILE_ID" -O- | \
+        sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p' > /tmp/confirm.txt 2>/dev/null || true
+      
+      if [ -s /tmp/confirm.txt ]; then
+        CONFIRM=$(cat /tmp/confirm.txt)
+        wget --load-cookies /tmp/cookies.txt --progress=bar:force:noscroll \
+          "https://drive.google.com/uc?export=download&confirm=$CONFIRM&id=$FILE_ID" \
+          -O "$ROOT/$DATA_ARCHIVE_NAME" || {
+          warn "wget download failed completely"
+          rm -f /tmp/cookies.txt /tmp/confirm.txt
+          return 1
+        }
+      else
+        warn "Could not get confirmation token"
+        rm -f /tmp/cookies.txt /tmp/confirm.txt
         return 1
-      }
+      fi
+      
+      rm -f /tmp/cookies.txt /tmp/confirm.txt
     }
+    
   elif command -v curl >/dev/null 2>&1; then
-    curl -L --progress-bar -o "$ROOT/$DATA_ARCHIVE_NAME" "$DATA_ARCHIVE_URL" || {
-      warn "Download failed. Please download $DATA_ARCHIVE_NAME manually."
+    # Try direct download with curl
+    curl -L --progress-bar \
+      "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
+      -o "$ROOT/$DATA_ARCHIVE_NAME" || {
+      warn "curl download failed"
       return 1
     }
   else
     warn "Neither wget nor curl available. Please install one or download manually."
+    warn "Manual download: https://drive.google.com/file/d/$FILE_ID/view"
     return 1
+  fi
+  
+  # Verify download size (should be much larger than 100KB)
+  if [ -f "$ROOT/$DATA_ARCHIVE_NAME" ]; then
+    FILE_SIZE=$(stat -c%s "$ROOT/$DATA_ARCHIVE_NAME" 2>/dev/null || echo "0")
+    if [ "$FILE_SIZE" -lt 100000 ]; then
+      warn "Downloaded file is too small ($FILE_SIZE bytes). Likely got HTML confirmation page."
+      warn "Please try downloading manually from: https://drive.google.com/file/d/$FILE_ID/view"
+      rm -f "$ROOT/$DATA_ARCHIVE_NAME"
+      return 1
+    else
+      log "✓ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
+    fi
   fi
   
   log "📦 Extracting data and models…"
