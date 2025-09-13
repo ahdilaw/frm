@@ -225,18 +225,35 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
             import tensorflow as tf
             print(f"[GPU] {Path(model_path).name} - Trying GPU delegate")
             
-            # Create GPU delegate
-            gpu_delegate = tf.lite.experimental.GpuDelegate(
-                options={'precision_loss_allowed': True}  # Allow precision loss for better performance
-            )
+            # Create GPU delegate - handle TensorFlow 2.20.0+ API changes
+            gpu_delegate = None
+            try:
+                # Try new API path (TensorFlow 2.20.0+)
+                gpu_delegate = tf.lite.experimental.GpuDelegate(
+                    options={'precision_loss_allowed': True}
+                )
+            except AttributeError:
+                try:
+                    # Try alternative API paths for newer versions
+                    from tensorflow.lite.python.interpreter import GpuDelegate
+                    gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
+                except ImportError:
+                    try:
+                        # Try importing from different module
+                        from tensorflow.lite.experimental import GpuDelegate
+                        gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
+                    except ImportError:
+                        print(f"[GPU-SKIP] {Path(model_path).name} - GPU delegate not available in this TensorFlow version")
+                        raise AttributeError("GPU delegate not found")
             
-            interp = tf.lite.Interpreter(
-                model_path=model_path,
-                experimental_delegates=[gpu_delegate]
-            )
-            interp.allocate_tensors()
-            print(f"[GPU-SUCCESS] {Path(model_path).name} - Using GPU acceleration")
-            return interp
+            if gpu_delegate is not None:
+                interp = tf.lite.Interpreter(
+                    model_path=model_path,
+                    experimental_delegates=[gpu_delegate]
+                )
+                interp.allocate_tensors()
+                print(f"[GPU-SUCCESS] {Path(model_path).name} - Using GPU acceleration")
+                return interp
             
         except Exception as gpu_e:
             print(f"[GPU-FAIL] {Path(model_path).name} - GPU delegate failed: {gpu_e}, falling back to CPU")
@@ -271,11 +288,28 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                     # Add GPU delegate if requested and available
                     if use_gpu and GPU_AVAILABLE:
                         try:
-                            gpu_delegate = tf.lite.experimental.GpuDelegate(
-                                options={'precision_loss_allowed': True}
-                            )
-                            delegates.append(gpu_delegate)
-                            print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
+                            # Try different GPU delegate API paths for TensorFlow 2.20.0+
+                            gpu_delegate = None
+                            try:
+                                gpu_delegate = tf.lite.experimental.GpuDelegate(
+                                    options={'precision_loss_allowed': True}
+                                )
+                            except AttributeError:
+                                try:
+                                    from tensorflow.lite.python.interpreter import GpuDelegate
+                                    gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
+                                except ImportError:
+                                    try:
+                                        from tensorflow.lite.experimental import GpuDelegate
+                                        gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
+                                    except ImportError:
+                                        gpu_delegate = None
+                            
+                            if gpu_delegate is not None:
+                                delegates.append(gpu_delegate)
+                                print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
+                            else:
+                                print(f"[FLEX-GPU-SKIP] {Path(model_path).name} - GPU delegate not available")
                         except Exception as gpu_e:
                             print(f"[FLEX-GPU-FAIL] {Path(model_path).name} - GPU delegate failed: {gpu_e}")
                     
