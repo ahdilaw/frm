@@ -221,10 +221,26 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
     
     # Try GPU delegate first if requested and available
     if use_gpu and GPU_AVAILABLE and RUNTIME == "tensorflow.lite":
-        print(f"[GPU-SKIP] {Path(model_path).name} - GPU delegate libraries not installed in this TensorFlow build")
-        # GPU delegate libraries are not available in this TensorFlow installation
-        # This is common with pip-installed TensorFlow 2.20.0
-        # Fall through to CPU approach
+        try:
+            import tensorflow as tf
+            print(f"[GPU] {Path(model_path).name} - Trying GPU delegate")
+            
+            # Create GPU delegate (TensorFlow 2.16.1 has working GpuDelegate)
+            gpu_delegate = tf.lite.experimental.GpuDelegate(
+                options={'precision_loss_allowed': True}
+            )
+            
+            interp = tf.lite.Interpreter(
+                model_path=model_path,
+                experimental_delegates=[gpu_delegate]
+            )
+            interp.allocate_tensors()
+            print(f"[GPU-SUCCESS] {Path(model_path).name} - Using GPU acceleration")
+            return interp
+            
+        except Exception as gpu_e:
+            print(f"[GPU-FAIL] {Path(model_path).name} - GPU delegate failed: {gpu_e}, falling back to CPU")
+            # Fall through to CPU approach
     
     try:
         # Try with basic CPU settings
@@ -249,16 +265,29 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                     import tensorflow as tf
                     print(f"[FLEX] {Path(model_path).name} - Loading with TensorFlow Flex delegate support")
                     
-                    # Skip GPU delegate since libraries are not available in this TensorFlow build
-                    print(f"[FLEX-GPU-SKIP] {Path(model_path).name} - GPU delegate libraries not installed in this TensorFlow build")
+                    # Create delegates list
+                    delegates = []
                     
-                    # Create interpreter with full TensorFlow support (enables Flex delegate automatically)
-                    # Note: TensorFlow automatically enables Flex delegate when using tf.lite.Interpreter
-                    # for models with TensorFlow ops, even without explicit delegate libraries
-                    interp = tf.lite.Interpreter(model_path=model_path)
+                    # Add GPU delegate if requested and available
+                    if use_gpu and GPU_AVAILABLE:
+                        try:
+                            gpu_delegate = tf.lite.experimental.GpuDelegate(
+                                options={'precision_loss_allowed': True}
+                            )
+                            delegates.append(gpu_delegate)
+                            print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
+                        except Exception as gpu_e:
+                            print(f"[FLEX-GPU-SKIP] {Path(model_path).name} - GPU delegate failed: {gpu_e}")
+                    
+                    # Create interpreter with TensorFlow support (enables Flex delegate automatically)
+                    interp = tf.lite.Interpreter(
+                        model_path=model_path,
+                        experimental_delegates=delegates
+                    )
                     interp.allocate_tensors()
                     
-                    print(f"[FLEX-SUCCESS] {Path(model_path).name} - Loaded with automatic Flex delegate support")
+                    delegate_info = f" + GPU" if (use_gpu and GPU_AVAILABLE and any(delegates)) else ""
+                    print(f"[FLEX-SUCCESS] {Path(model_path).name} - Loaded with Flex delegate{delegate_info}")
                     return interp
                     
                 except Exception as flex_e:
