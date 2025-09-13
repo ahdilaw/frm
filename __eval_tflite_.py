@@ -85,21 +85,37 @@ _IMPORT_ERR = None
 # First try full TensorFlow for best compatibility (Flex delegate + GPU support)
 try:
     import tensorflow as tf
-    from tensorflow.lite import Interpreter  # type: ignore
-    RUNTIME = "tensorflow.lite"
     TF_AVAILABLE = True
-    print(f"✓ Successfully imported full TensorFlow with TensorFlow Lite")
     
-    # Check for GPU availability
-    try:
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-        if gpus:
-            GPU_AVAILABLE = True
-            print(f"✓ GPU support detected - {len(gpus)} GPU(s) available")
-        else:
-            print(f"✓ No GPU devices found - using CPU only")
-    except Exception as gpu_e:
-        print(f"✓ GPU check failed: {gpu_e} - using CPU only")
+    # Try different TensorFlow Lite import paths
+    Interpreter = None
+    if hasattr(tf, 'lite') and hasattr(tf.lite, 'Interpreter'):
+        Interpreter = tf.lite.Interpreter
+    elif hasattr(tf, 'compat') and hasattr(tf.compat, 'v1') and hasattr(tf.compat.v1, 'lite'):
+        Interpreter = tf.compat.v1.lite.Interpreter
+    else:
+        # Try direct import as fallback
+        try:
+            from tensorflow.lite import Interpreter  # type: ignore
+        except ImportError:
+            Interpreter = None
+    
+    if Interpreter is not None:
+        RUNTIME = "tensorflow.lite"
+        print(f"✓ Successfully imported full TensorFlow with TensorFlow Lite")
+        
+        # Check for GPU availability
+        try:
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                GPU_AVAILABLE = True
+                print(f"✓ GPU support detected - {len(gpus)} GPU(s) available")
+            else:
+                print(f"✓ No GPU devices found - using CPU only")
+        except Exception as gpu_e:
+            print(f"✓ GPU check failed: {gpu_e} - using CPU only")
+    else:
+        raise ImportError("TensorFlow Lite Interpreter not found in any expected location")
         
 except ImportError as tf_e:
     print(f"✗ Could not import full TensorFlow: {tf_e}")
@@ -107,6 +123,7 @@ except ImportError as tf_e:
     try:
         from tflite_runtime.interpreter import Interpreter  # type: ignore
         RUNTIME = "tflite_runtime"
+        TF_AVAILABLE = False
         print(f"✓ Successfully imported tflite_runtime (CPU only, no Flex delegate)")
         print(f"✓ Limited compatibility - some models may fail (install tensorflow for full support)")
     except ImportError as e:
