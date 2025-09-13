@@ -1342,7 +1342,9 @@ if __name__ == "__main__":
                     {
                         "energy_mean_j_per_sample": ej_s["mean"],
                         "energy_median_j_per_sample": ej_s["median"],
+                        "energy_p90_j_per_sample": ej_s["p90"],
                         "energy_p95_j_per_sample": ej_s["p95"],
+                        "energy_p99_j_per_sample": ej_s["p99"],
                     }
                 )
                 if "energy_host_j_per_sample" in df.columns:
@@ -1461,7 +1463,9 @@ if __name__ == "__main__":
         # energy
         "energy_mean_j_per_sample",
         "energy_median_j_per_sample",
+        "energy_p90_j_per_sample",
         "energy_p95_j_per_sample",
+        "energy_p99_j_per_sample",
         "energy_host_median_j_per_sample",
         "energy_gpu_median_j_per_sample",
         "energy_dram_median_j_per_sample",
