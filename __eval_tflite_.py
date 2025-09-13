@@ -85,9 +85,18 @@ try:
 except ImportError as e:
     print(f"✗ Could not import tflite_runtime: {e}")
     try:
-        from tensorflow.lite import Interpreter  # type: ignore
-        RUNTIME = "tensorflow.lite"
-        print(f"✓ Successfully imported tensorflow.lite as fallback")
+        # Try multiple TensorFlow Lite import paths
+        try:
+            from tensorflow.lite import Interpreter  # type: ignore
+            RUNTIME = "tensorflow.lite"
+            print(f"✓ Successfully imported tensorflow.lite as fallback")
+        except ImportError:
+            # Try alternative import path for newer TF versions
+            import tensorflow as tf
+            Interpreter = tf.lite.Interpreter
+            RUNTIME = "tensorflow.lite"
+            print(f"✓ Successfully imported tensorflow.lite.Interpreter via tf.lite")
+        
         # Check if full TensorFlow is available for Flex delegate and GPU
         try:
             import tensorflow as tf
@@ -106,7 +115,7 @@ except ImportError as e:
                 print(f"✓ GPU check failed: {gpu_e} - using CPU only")
         except ImportError:
             print(f"✓ TensorFlow Lite only (no Flex delegate or GPU support)")
-    except ImportError as e2:
+    except (ImportError, AttributeError) as e2:
         Interpreter = None
         RUNTIME = None
         _IMPORT_ERR = f"tflite_runtime: {e}, tensorflow.lite: {e2}"
@@ -229,8 +238,11 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
     try:
         # Try with basic CPU settings
         if RUNTIME == "tensorflow.lite":
-            interp = Interpreter(model_path=model_path)
+            # Use TensorFlow's Interpreter directly
+            import tensorflow as tf
+            interp = tf.lite.Interpreter(model_path=model_path)
         else:
+            # Use tflite_runtime
             interp = Interpreter(model_path=model_path, num_threads=1)
         interp.allocate_tensors()
         return interp

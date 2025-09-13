@@ -237,28 +237,73 @@ else
 fi
 
 # TensorFlow (GPU → full TF; else CPU TF; Pi → tflite-runtime)
+# Always try to install tflite-runtime as a fallback
 if [ $IS_PI -eq 1 ]; then
   "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
 else
   if [ $HAS_NVIDIA -eq 1 ]; then
-    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow>=2.13.0" \
-    || "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu>=2.13.0" \
-    || "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
+    # Try full TensorFlow first for GPU support, fallback to CPU, then tflite-runtime
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow>=2.13.0" || {
+      log "Full TensorFlow failed, trying CPU version..."
+      "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu>=2.13.0" || {
+        log "TensorFlow CPU failed, trying tflite-runtime..."
+        "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
+      }
+    }
   else
-    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu>=2.13.0" \
-    || "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
+    # CPU-only systems: try CPU TensorFlow first, fallback to tflite-runtime
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu>=2.13.0" || {
+      log "TensorFlow CPU failed, trying tflite-runtime..."
+      "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
+    }
   fi
+  
+  # Always try to install tflite-runtime as additional fallback (won't conflict)
+  "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
 fi
 
-# Verify TF import (fail fast)
+# Verify TF import and TFLite interpreter availability
 "$VENV_TFL/bin/python" - <<'PY'
 import sys
+
+# Test TensorFlow import
+tf_ok = False
+tflite_runtime_ok = False
+interpreter_ok = False
+
 try:
     import tensorflow as tf
-    print("TF OK:", tf.__version__)
+    print("✓ TensorFlow OK:", tf.__version__)
+    tf_ok = True
+    
+    # Test TFLite interpreter via TensorFlow
+    try:
+        interpreter = tf.lite.Interpreter
+        print("✓ tf.lite.Interpreter available")
+        interpreter_ok = True
+    except AttributeError:
+        print("✗ tf.lite.Interpreter not available")
+    
 except Exception as e:
-    print("TF import failed:", e)
+    print("✗ TensorFlow import failed:", e)
+
+# Test tflite-runtime fallback
+try:
+    from tflite_runtime.interpreter import Interpreter
+    print("✓ tflite-runtime available")
+    tflite_runtime_ok = True
+    if not interpreter_ok:
+        interpreter_ok = True
+        print("✓ Using tflite-runtime as interpreter")
+except Exception as e:
+    print("✗ tflite-runtime import failed:", e)
+
+if not interpreter_ok:
+    print("❌ No TFLite interpreter available!")
+    print("   Please check TensorFlow or tflite-runtime installation")
     sys.exit(1)
+else:
+    print("✅ TFLite interpreter ready")
 PY
 
 # --- Helper tools (device info + hygiene JSON)
@@ -401,16 +446,23 @@ if [ -f "$ROOT/__eval_tflite_.py" ]; then
   log "TFLite eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
   TFL_FLAGS=()
   if [ $HAS_NVIDIA -eq 1 ]; then
-    if "$VENV_TFL/bin/python" - <<'PY'
+    TF_GPU_OK="$("$VENV_TFL/bin/python" - <<'PY'
 ok=0
 try:
     import tensorflow as tf
-    ok = hasattr(tf, "config") and callable(getattr(tf.config, "list_physical_devices", None))
+    # Check for both TF config and TFLite Interpreter
+    has_config = hasattr(tf, "config") and callable(getattr(tf.config, "list_physical_devices", None))
+    has_interpreter = hasattr(tf, "lite") and hasattr(tf.lite, "Interpreter")
+    ok = has_config and has_interpreter
+    if ok:
+        print("1")  # GPU delegate available
+    else:
+        print("0")  # No GPU delegate
 except Exception:
-    ok=0
-print(ok)
+    print("0")
 PY
-    then
+)"
+    if [ "$TF_GPU_OK" = "1" ]; then
       TFL_FLAGS+=(--gpu)
       log "GPU delegate enabled for TFLite"
     fi
