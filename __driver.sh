@@ -138,15 +138,6 @@ except Exception as e:
       log "✅ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
     fi
   fi
-    if [ "$FILE_SIZE" -lt 100000 ]; then
-      warn "Downloaded file is too small ($FILE_SIZE bytes). Likely got HTML confirmation page."
-      warn "Please try downloading manually from: https://drive.google.com/file/d/$FILE_ID/view"
-      rm -f "$ROOT/$DATA_ARCHIVE_NAME"
-      return 1
-    else
-      log "✓ Downloaded $(($FILE_SIZE / 1024 / 1024))MB archive successfully"
-    fi
-  fi
   
   log "📦 Extracting data and models…"
   tar -xzf "$ROOT/$DATA_ARCHIVE_NAME" -C "$ROOT" || {
