@@ -281,12 +281,6 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                     print(f"[FLEX-FAIL] {Path(model_path).name} - Flex delegate failed: {flex_e}")
             else:
                 print(f"[SKIP] {Path(model_path).name} - Full TensorFlow not available for Flex delegate")
-                    try:
-                        import tensorflow as tf
-                        # Some models work better with explicit Flex delegate loading
-                        delegates = []
-                        
-                        # Add GPU delegate if requested and available
             
             print(f"[SKIP] {Path(model_path).name} - Requires TensorFlow Flex delegate (unsupported operations)")
             raise RuntimeError(f"Model requires Flex delegate: {e}")
