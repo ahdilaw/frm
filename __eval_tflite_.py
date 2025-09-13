@@ -42,10 +42,14 @@ except Exception:
 
 # NVIDIA NVML
 try:
-    import nvidia_ml_py3 as pynvml
+    import pynvml
     HAVE_NVML = True
 except Exception:
-    HAVE_NVML = False
+    try:
+        import nvidia_ml_py3 as pynvml
+        HAVE_NVML = True
+    except Exception:
+        HAVE_NVML = False
 
 # ONNX (for model statics if needed)
 try:
@@ -1489,7 +1493,9 @@ if __name__ == "__main__":
                     summary_row.update({
                         "energy_mean_j_per_sample": energy_stats["mean"],
                         "energy_median_j_per_sample": energy_stats["median"],
+                        "energy_p90_j_per_sample": energy_stats["p90"],
                         "energy_p95_j_per_sample": energy_stats["p95"],
+                        "energy_p99_j_per_sample": energy_stats["p99"],
                     })
                 
                 if energy_host_values:
@@ -1589,7 +1595,9 @@ if __name__ == "__main__":
         "mem_device_backend",
         "energy_mean_j_per_sample",
         "energy_median_j_per_sample",
+        "energy_p90_j_per_sample",
         "energy_p95_j_per_sample",
+        "energy_p99_j_per_sample",
         "energy_host_median_j_per_sample",
         "energy_gpu_median_j_per_sample",
         "energy_dram_median_j_per_sample",
