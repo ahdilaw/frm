@@ -82,47 +82,37 @@ TF_AVAILABLE = False
 GPU_AVAILABLE = False
 _IMPORT_ERR = None
 
+# First try full TensorFlow for best compatibility (Flex delegate + GPU support)
 try:
-    from tflite_runtime.interpreter import Interpreter  # type: ignore
-    RUNTIME = "tflite_runtime"
-    print(f"✓ Successfully imported tflite_runtime")
-except ImportError as e:
-    print(f"✗ Could not import tflite_runtime: {e}")
+    import tensorflow as tf
+    from tensorflow.lite import Interpreter  # type: ignore
+    RUNTIME = "tensorflow.lite"
+    TF_AVAILABLE = True
+    print(f"✓ Successfully imported full TensorFlow with TensorFlow Lite")
+    
+    # Check for GPU availability
     try:
-        # Try multiple TensorFlow Lite import paths
-        try:
-            from tensorflow.lite import Interpreter  # type: ignore
-            RUNTIME = "tensorflow.lite"
-            print(f"✓ Successfully imported tensorflow.lite as fallback")
-        except ImportError:
-            # Try alternative import path for newer TF versions
-            import tensorflow as tf
-            Interpreter = tf.lite.Interpreter
-            RUNTIME = "tensorflow.lite"
-            print(f"✓ Successfully imported tensorflow.lite.Interpreter via tf.lite")
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if gpus:
+            GPU_AVAILABLE = True
+            print(f"✓ GPU support detected - {len(gpus)} GPU(s) available")
+        else:
+            print(f"✓ No GPU devices found - using CPU only")
+    except Exception as gpu_e:
+        print(f"✓ GPU check failed: {gpu_e} - using CPU only")
         
-        # Check if full TensorFlow is available for Flex delegate and GPU
-        try:
-            import tensorflow as tf
-            TF_AVAILABLE = True
-            print(f"✓ Full TensorFlow detected - Flex delegate support available")
-            
-            # Check for GPU availability
-            try:
-                gpus = tf.config.experimental.list_physical_devices('GPU')
-                if gpus:
-                    GPU_AVAILABLE = True
-                    print(f"✓ GPU support detected - {len(gpus)} GPU(s) available")
-                else:
-                    print(f"✓ No GPU devices found - using CPU only")
-            except Exception as gpu_e:
-                print(f"✓ GPU check failed: {gpu_e} - using CPU only")
-        except ImportError:
-            print(f"✓ TensorFlow Lite only (no Flex delegate or GPU support)")
-    except (ImportError, AttributeError) as e2:
+except ImportError as tf_e:
+    print(f"✗ Could not import full TensorFlow: {tf_e}")
+    # Fallback to tflite_runtime (CPU only, no Flex delegate)
+    try:
+        from tflite_runtime.interpreter import Interpreter  # type: ignore
+        RUNTIME = "tflite_runtime"
+        print(f"✓ Successfully imported tflite_runtime (CPU only, no Flex delegate)")
+        print(f"✓ Limited compatibility - some models may fail (install tensorflow for full support)")
+    except ImportError as e:
         Interpreter = None
         RUNTIME = None
-        _IMPORT_ERR = f"tflite_runtime: {e}, tensorflow.lite: {e2}"
+        _IMPORT_ERR = f"tensorflow: {tf_e}, tflite_runtime: {e}"
         print(f"✗ No TFLite backend available: {_IMPORT_ERR}")
 
 # Early exit if no interpreter is available
@@ -257,10 +247,12 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
             print(f"[FLEX] {Path(model_path).name} - Trying with TensorFlow Flex delegate")
             
             # Try with Flex delegate if full tensorflow is available
-            if RUNTIME == "tensorflow.lite":
+            if RUNTIME == "tensorflow.lite" and TF_AVAILABLE:
                 try:
                     import tensorflow as tf
-                    # Create interpreter with Flex delegate support
+                    print(f"[FLEX] {Path(model_path).name} - Loading with TensorFlow Flex delegate support")
+                    
+                    # Create delegates list
                     delegates = []
                     
                     # Add GPU delegate if requested and available
@@ -270,51 +262,33 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                                 options={'precision_loss_allowed': True}
                             )
                             delegates.append(gpu_delegate)
-                            print(f"[FLEX-GPU] {Path(model_path).name} - Trying Flex + GPU delegates")
+                            print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
                         except Exception as gpu_e:
                             print(f"[FLEX-GPU-FAIL] {Path(model_path).name} - GPU delegate failed: {gpu_e}")
                     
+                    # Create interpreter with full TensorFlow support (enables Flex delegate automatically)
                     interp = tf.lite.Interpreter(
                         model_path=model_path,
                         experimental_delegates=delegates
                     )
-                    
-                    # Enable TensorFlow ops (Flex delegate)
-                    # This is automatically handled in newer TensorFlow versions
                     interp.allocate_tensors()
-                    delegate_info = f" + GPU" if (use_gpu and GPU_AVAILABLE and delegates) else ""
-                    print(f"[SUCCESS] {Path(model_path).name} - Loaded with TensorFlow Lite + Flex delegate{delegate_info}")
+                    
+                    delegate_info = f" + GPU" if (use_gpu and GPU_AVAILABLE and any(delegates)) else ""
+                    print(f"[FLEX-SUCCESS] {Path(model_path).name} - Loaded with Flex delegate{delegate_info}")
                     return interp
-                except ImportError:
-                    print(f"[SKIP] {Path(model_path).name} - Full TensorFlow not available for Flex delegate")
+                    
                 except Exception as flex_e:
                     print(f"[FLEX-FAIL] {Path(model_path).name} - Flex delegate failed: {flex_e}")
-                    # Try alternative approach with experimental delegates
+            else:
+                print(f"[SKIP] {Path(model_path).name} - Full TensorFlow not available for Flex delegate")
                     try:
                         import tensorflow as tf
                         # Some models work better with explicit Flex delegate loading
                         delegates = []
                         
                         # Add GPU delegate if requested and available
-                        if use_gpu and GPU_AVAILABLE:
-                            try:
-                                gpu_delegate = tf.lite.experimental.GpuDelegate()
-                                delegates.append(gpu_delegate)
-                            except Exception:
-                                pass
-                        
-                        interp = tf.lite.Interpreter(
-                            model_path=model_path,
-                            experimental_delegates=delegates # Empty list allows TF ops
-                        )
-                        interp.allocate_tensors()
-                        delegate_info = f" + GPU" if delegates else ""
-                        print(f"[SUCCESS] {Path(model_path).name} - Loaded with TensorFlow ops enabled{delegate_info}")
-                        return interp
-                    except Exception as flex_e2:
-                        print(f"[FLEX-FAIL2] {Path(model_path).name} - Alternative Flex approach failed: {flex_e2}")
             
-            print(f"[SKIP] {Path(model_path).name} - Requires TensorFlow Flex delegate (unsupported Erf operations)")
+            print(f"[SKIP] {Path(model_path).name} - Requires TensorFlow Flex delegate (unsupported operations)")
             raise RuntimeError(f"Model requires Flex delegate: {e}")
         else:
             print(f"[ERROR] Failed to create interpreter for {model_path}: {e}")
@@ -322,10 +296,11 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
         # Try fallback without delegates
         try:
             if RUNTIME == "tensorflow.lite":
-                interp = Interpreter(model_path=model_path, experimental_delegates=[])
+                interp = tf.lite.Interpreter(model_path=model_path, experimental_delegates=[])
             else:
                 interp = Interpreter(model_path=model_path, num_threads=1)
             interp.allocate_tensors()
+            print(f"[FALLBACK] {Path(model_path).name} - Using basic interpreter without delegates")
             return interp
         except Exception as e2:
             raise RuntimeError(f"Failed to create interpreter for {model_path}: {e}, fallback: {e2}")
@@ -1295,6 +1270,15 @@ if __name__ == "__main__":
     p.add_argument("--energy-sample-hz", type=int, default=300, help="Energy sampler frequency (Hz), ≥200 recommended")
     p.add_argument("--gflops-map", type=str, default="", help="CSV with columns [model_name,gflops] for J/GFLOP")
     args = p.parse_args()
+
+    # Enforce full TensorFlow requirement for GPU acceleration
+    if args.gpu and (RUNTIME != "tensorflow.lite" or not TF_AVAILABLE):
+        print(f"❌ Error: --gpu flag requires full TensorFlow installation")
+        print(f"   Current backend: {RUNTIME or 'None'}")
+        print(f"   TensorFlow available: {TF_AVAILABLE}")
+        print(f"   GPU acceleration is only available with full TensorFlow, not tflite_runtime")
+        print(f"   Install with: pip install tensorflow")
+        raise SystemExit("GPU acceleration requires full TensorFlow")
 
     if RUNTIME is None:
         raise SystemExit("No TFLite backend available. Install 'tflite-runtime' (preferred) or 'tensorflow'.")
