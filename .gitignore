@@ -1,6 +1,7 @@
 # Data and Models
 data/
 models/
+__scratch.md
 
 # Archive files
 *.tar.gz

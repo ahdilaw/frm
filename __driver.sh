@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: bash __driver.sh [--blaze] [--run N]
+# Usage: bash __driver.sh [--blaze] [--run N] [--tflite] [--onnx] [--torch]
 set -euo pipefail
 
 trap 'echo -e "[\e[31m$(date +'%H:%M:%S')\e[0m] ❌ Error on line $LINENO"; exit 1' ERR
@@ -11,7 +11,9 @@ DATA_ARCHIVE_NAME="frm_code_static_250913.tar.gz"
 # --- Parse args ---
 BLAZE=""
 RUN_COUNT=1
-SKIP_SETUP=0
+USE_TFLITE=0
+USE_ONNX=0
+USE_TORCH=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,43 +27,34 @@ while [[ $# -gt 0 ]]; do
       fi
       RUN_COUNT="$2"
       shift 2 ;;
+    --tflite)
+      USE_TFLITE=1
+      shift ;;
+    --onnx)
+      USE_ONNX=1
+      shift ;;
+    --torch)
+      USE_TORCH=1
+      shift ;;
     *) 
       echo "Unknown arg: $1" >&2
-      echo "Usage: bash __driver.sh [--blaze] [--run N]" >&2
+      echo "Usage: bash __driver.sh [--blaze] [--run N] [--tflite] [--onnx] [--torch]" >&2
       exit 2 ;;
   esac
 done
 
-log "Multiple runs requested: $RUN_COUNT"
-log "Arguments: BLAZE=$BLAZE"
+# If no framework specified, enable all
+if [[ $USE_TFLITE -eq 0 && $USE_ONNX -eq 0 && $USE_TORCH -eq 0 ]]; then
+  USE_TFLITE=1
+  USE_ONNX=1
+  USE_TORCH=1
+fi
 
-# --- Setup paths and environments (once) ---
-BASE_TS="$(date -u +'%Y%m%dT%H%M%SZ')"
-ROOT="$(pwd)"
-SETUP_DIR="$ROOT/setup_$BASE_TS"
-VENV_OX="$SETUP_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
-VENV_TFL="$SETUP_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+# --- Helper functions ---
+log()  { echo -e "[\e[32m$(date +'%H:%M:%S')\e[0m] $*"; }
+warn() { echo -e "[\e[33m$(date +'%H:%M:%S')\e[0m] ⚠ $*" >&2; }
 
-mkdir -p "$SETUP_DIR"
-
-# --- Main execution function ---
-run_benchmark() {
-  local run_num=$1
-  local base_ts=$2
-  
-  TS="${base_ts}_run${run_num}"
-  RUN_DIR="$ROOT/runs/$TS"
-  PROV_DIR="$RUN_DIR/provenance"
-  LOG_DIR="$RUN_DIR/logs"
-  RES_DIR="$RUN_DIR/results"
-  
-  mkdir -p "$PROV_DIR" "$LOG_DIR" "$RES_DIR"
-  
-  log "=== Starting benchmark run $run_num/$RUN_COUNT ==="
-
-log()  { echo -e "[$(date +'%H:%M:%S')] $*"; }
-warn() { echo -e "[$(date +'%H:%M:%S')] ⚠ $*" >&2; }
-
+# --- System detection ---
 OS_ID="unknown"; OS_VER=""; ARCH="$(uname -m)"
 if [ -f /etc/os-release ]; then . /etc/os-release || true; OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-}"; fi
 HAS_APT=0; command -v apt-get  >/dev/null 2>&1 && HAS_APT=1
@@ -71,6 +64,8 @@ HAS_NVIDIA=0; command -v nvidia-smi >/dev/null 2>&1 && HAS_NVIDIA=1
 HAS_ROCM=0; command -v rocm-smi >/dev/null 2>&1 && HAS_ROCM=1
 IS_PI=0; grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null && IS_PI=1
 
+log "Multiple runs requested: $RUN_COUNT"
+log "Frameworks: TFLite=$USE_TFLITE ONNX=$USE_ONNX Torch=$USE_TORCH BLAZE=$BLAZE"
 log "OS: $OS_ID $OS_VER | ARCH: $ARCH | NVIDIA: $HAS_NVIDIA | ROCm: $HAS_ROCM | RPi: $IS_PI"
 
 # --- Download and extract data/models if not present ---
@@ -191,6 +186,30 @@ except Exception as e:
   fi
 }
 
+# --- Setup paths and environments (once) ---
+BASE_TS="$(date -u +'%Y%m%dT%H%M%SZ')"
+ROOT="$(pwd)"
+SETUP_DIR="$ROOT/setup_$BASE_TS"
+VENV_OX="$SETUP_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
+VENV_TFL="$SETUP_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+
+mkdir -p "$SETUP_DIR"
+
+# --- Main execution function ---
+run_benchmark() {
+  local run_num=$1
+  local base_ts=$2
+  
+  TS="${base_ts}_run${run_num}"
+  RUN_DIR="$ROOT/runs/$TS"
+  PROV_DIR="$RUN_DIR/provenance"
+  LOG_DIR="$RUN_DIR/logs"
+  RES_DIR="$RUN_DIR/results"
+  
+  mkdir -p "$PROV_DIR" "$LOG_DIR" "$RES_DIR"
+  
+  log "=== Starting benchmark run $run_num/$RUN_COUNT ==="
+
 # --- Helper tools (device info + hygiene JSON)
 cat > "$SETUP_DIR/device_info_collect.py" << 'PY'
 import json, os, platform, subprocess, sys
@@ -290,59 +309,73 @@ PY
   cp "$SETUP_DIR/device_info_collect.py" "$RUN_DIR/"
   cp "$SETUP_DIR/hygiene_apply_and_snapshot.py" "$RUN_DIR/"
   
-  # --- Collect device info + hygiene (Torch/ONNX env)
+  # --- Collect device info + hygiene (appropriate env based on frameworks)
   log "Collecting device info JSON…"
-  source "$VENV_OX/bin/activate"
-  python "$RUN_DIR/device_info_collect.py" | tee "$PROV_DIR/device_info.json" >/dev/null
-  log "Applying hygiene + snapshot… (locking GPU clocks best-effort)"
-  python "$RUN_DIR/hygiene_apply_and_snapshot.py" | tee "$PROV_DIR/hygiene_post.json" >/dev/null
-  deactivate || true
-
-  # --- Common eval flags (GPU pod optimized benchmarking configuration)
-  # Balanced approach: 2 warmup + 1 repeat for efficiency with minimal cold-start bias
-  # With 1000 samples: 2k warmup inferences + 1k measurement inferences = good balance
-  LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)
-  MEM_FLAGS=(--mem --mem-sample-hz 500)  # 2ms intervals for fast GPU memory changes
-  ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
-  ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
-
-  # --- ONNX eval (Torch/ONNX env)
-  if [ -f "$ROOT/__eval_onnx_.py" ]; then
-    log "ONNX eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
+  if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
     source "$VENV_OX/bin/activate"
-    
-    # Validate per-sample configuration
-    log "Validating per-sample inference configuration…"
-    if ! python -c "
-import sys
-# Verify batch size is 1 for true per-sample inference
-args = sys.argv[1:]
-bs_idx = next((i for i, arg in enumerate(args) if arg == '--bs'), None)
-if bs_idx is None or int(args[bs_idx + 1]) != 1:
-    print('ERROR: Batch size must be 1 for per-sample inference')
-    sys.exit(1)
-print('✓ Per-sample configuration validated')
-" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE; then
-      warn "Per-sample validation failed"
-      deactivate || true
-      return 1
-    fi
-    
-    python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
+    python "$RUN_DIR/device_info_collect.py" | tee "$PROV_DIR/device_info.json" >/dev/null
+    log "Applying hygiene + snapshot… (locking GPU clocks best-effort)"
+    python "$RUN_DIR/hygiene_apply_and_snapshot.py" | tee "$PROV_DIR/hygiene_post.json" >/dev/null
     deactivate || true
-    mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
   fi
 
-  # --- TFLite eval - DISABLED for GPU pod benchmarking
-  log "TensorFlow Lite evaluation skipped - optimized for GPU server benchmarking"
+  # --- Common eval flags
+  LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)
+  MEM_FLAGS=(--mem --mem-sample-hz 500)
+  ENERGY_FLAGS=(--energy --energy-sample-hz 300)
 
-  # --- PyTorch eval (Torch/ONNX env)
-  if [ -f "$ROOT/__eval_torch_.py" ]; then
-    log "PyTorch eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
-    source "$VENV_OX/bin/activate"
-    python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
-    deactivate || true
-    mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
+  # --- Alternating ONNX/Torch execution ---
+  if [[ $USE_ONNX -eq 1 && $USE_TORCH -eq 1 ]]; then
+    log "Running ONNX and Torch in alternating pattern..."
+    
+    # ONNX first
+    if [ -f "$ROOT/__eval_onnx_.py" ]; then
+      log "ONNX eval (run $run_num)…"
+      source "$VENV_OX/bin/activate"
+      python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
+      deactivate || true
+      mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
+    fi
+
+    # Torch second
+    if [ -f "$ROOT/__eval_torch_.py" ]; then
+      log "PyTorch eval (run $run_num)…"
+      source "$VENV_OX/bin/activate"
+      python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
+      deactivate || true
+      mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
+    fi
+    
+  elif [[ $USE_ONNX -eq 1 ]]; then
+    # ONNX only
+    if [ -f "$ROOT/__eval_onnx_.py" ]; then
+      log "ONNX eval (run $run_num)…"
+      source "$VENV_OX/bin/activate"
+      python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
+      deactivate || true
+      mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
+    fi
+    
+  elif [[ $USE_TORCH -eq 1 ]]; then
+    # Torch only
+    if [ -f "$ROOT/__eval_torch_.py" ]; then
+      log "PyTorch eval (run $run_num)…"
+      source "$VENV_OX/bin/activate"
+      python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
+      deactivate || true
+      mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
+    fi
+  fi
+
+  # --- TFLite eval (separate env for CPU/edge devices) ---
+  if [[ $USE_TFLITE -eq 1 ]]; then
+    if [ -f "$ROOT/__eval_tflite_.py" ]; then
+      log "TensorFlow Lite eval (run $run_num)…"
+      source "$VENV_TFL/bin/activate"
+      python "$ROOT/__eval_tflite_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/tflite.log"
+      deactivate || true
+      mv -f frm_tflite_results.ods "$RES_DIR/frm_tflite_results.ods" 2>/dev/null || true
+    fi
   fi
 
   # --- Package results
@@ -364,9 +397,6 @@ print('✓ Per-sample configuration validated')
 
   log "Packaging results…"
   tar -C "$RUN_DIR" -czf "$ROOT/results_$TS.tar.gz" provenance logs results
-  log "Benchmark run $run_num complete: $ROOT/results_$TS.tar.gz"
-  log "Configuration: warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference (bs=1)"
-  
   log "=== Finished benchmark run $run_num/$RUN_COUNT ==="
   return 0
 }
@@ -417,26 +447,39 @@ install_sysdeps() {
 }
 install_sysdeps
 
-# --- Python venvs + deps (setup once)
-# Torch/ONNX env (numpy > 2)
-log "Creating Torch/ONNX env…"
-python3 -m venv "$VENV_OX"
-"$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-"$VENV_OX/bin/pip" install $PIP_OPTS "numpy>2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
+# --- Python venvs + deps (setup once, only for requested frameworks)
+if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
+  log "Creating Torch/ONNX env…"
+  python3 -m venv "$VENV_OX"
+  "$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+  "$VENV_OX/bin/pip" install $PIP_OPTS "numpy>2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
 
-# Torch + torchvision (try CUDA wheels first, fallback to CPU)
-if [ $HAS_NVIDIA -eq 1 ]; then
-  "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cu121 "torch>=1.13.0" "torchvision>=0.14.0" \
-  || "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
-else
-  "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
+  if [[ $USE_TORCH -eq 1 ]]; then
+    # Torch + torchvision (try CUDA wheels first, fallback to CPU)
+    if [ $HAS_NVIDIA -eq 1 ]; then
+      "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cu121 "torch>=1.13.0" "torchvision>=0.14.0" \
+      || "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
+    else
+      "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
+    fi
+    "$VENV_OX/bin/pip" install $PIP_OPTS timm || true
+  fi
+  
+  if [[ $USE_ONNX -eq 1 ]]; then
+    # ONNX stack
+    "$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17"
+  fi
+  
+  "$VENV_OX/bin/pip" install $PIP_OPTS "nvidia-ml-py3"
 fi
-# ONNX stack
-"$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17" "nvidia-ml-py3"
-# Optional
-"$VENV_OX/bin/pip" install $PIP_OPTS timm || true
 
-log "TensorFlow Lite setup skipped - optimized for GPU server benchmarking"
+if [[ $USE_TFLITE -eq 1 ]]; then
+  log "Creating TensorFlow Lite env…"
+  python3 -m venv "$VENV_TFL"
+  "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+  "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
+  "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow>=2.10.0" "tflite-runtime>=2.10.0"
+fi
 
 # --- Execute benchmark runs ---
 FAILED_RUNS=0
