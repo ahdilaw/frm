@@ -236,30 +236,25 @@ else
   "$VENV_TFL/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
 fi
 
-# TensorFlow (GPU → full TF; else CPU TF; Pi → tflite-runtime)
-# Use TensorFlow 2.16.1 for stable GPU delegate support (2.20.0 has broken GPU delegates)
-# Always try to install tflite-runtime as a fallback
+# This includes all necessary CUDA libraries: CUDA Toolkit, cuDNN, NVCC, etc.
 if [ $IS_PI -eq 1 ]; then
   "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
 else
   if [ $HAS_NVIDIA -eq 1 ]; then
-    # Try TensorFlow 2.16.1 first for stable GPU delegate support, fallback to CPU, then tflite-runtime
-    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow==2.16.1" || {
-      log "TensorFlow 2.16.1 failed, trying CPU version..."
-      "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu==2.16.1" || {
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow[and-cuda]" || {
+      log "TensorFlow with CUDA failed, trying CPU version..."
+      "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu" || {
         log "TensorFlow CPU failed, trying tflite-runtime..."
         "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
       }
     }
   else
-    # CPU-only systems: try CPU TensorFlow 2.16.1 first, fallback to tflite-runtime
-    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu==2.16.1" || {
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu" || {
       log "TensorFlow CPU failed, trying tflite-runtime..."
       "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
     }
   fi
   
-  # Always try to install tflite-runtime as additional fallback (won't conflict)
   "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
 fi
 

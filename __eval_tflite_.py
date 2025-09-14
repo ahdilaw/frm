@@ -225,10 +225,46 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
             import tensorflow as tf
             print(f"[GPU] {Path(model_path).name} - Trying GPU delegate")
             
-            # Create GPU delegate (TensorFlow 2.16.1 has working GpuDelegate)
-            gpu_delegate = tf.lite.experimental.GpuDelegate(
-                options={'precision_loss_allowed': True}
-            )
+            # Try to create GPU delegate - handle different TensorFlow versions
+            gpu_delegate = None
+            
+            # Method 1: Try new TensorFlow 2.20+ API (if available)
+            try:
+                # Check if new LiteRT GPU delegate is available
+                if hasattr(tf.lite.experimental, 'GpuDelegate'):
+                    gpu_delegate = tf.lite.experimental.GpuDelegate(
+                        options={'precision_loss_allowed': True}
+                    )
+                    print(f"[GPU] Using tf.lite.experimental.GpuDelegate")
+            except Exception as e:
+                print(f"[GPU] tf.lite.experimental.GpuDelegate failed: {e}")
+            
+            # Method 2: Try alternative GPU delegate APIs (TF 2.20+)
+            if gpu_delegate is None:
+                try:
+                    # Try if there's a new GPU delegate location
+                    if hasattr(tf.lite, 'GpuDelegate'):
+                        gpu_delegate = tf.lite.GpuDelegate(
+                            options={'precision_loss_allowed': True}
+                        )
+                        print(f"[GPU] Using tf.lite.GpuDelegate")
+                except Exception as e:
+                    print(f"[GPU] tf.lite.GpuDelegate failed: {e}")
+            
+            # Method 3: Check for LiteRT-specific APIs
+            if gpu_delegate is None:
+                try:
+                    # Check if LiteRT has its own GPU delegate
+                    import importlib
+                    if importlib.util.find_spec('tensorflow.lite.runtime'):
+                        from tensorflow.lite.runtime import GpuDelegate
+                        gpu_delegate = GpuDelegate(options={'precision_loss_allowed': True})
+                        print(f"[GPU] Using tensorflow.lite.runtime.GpuDelegate")
+                except Exception as e:
+                    print(f"[GPU] LiteRT GpuDelegate failed: {e}")
+            
+            if gpu_delegate is None:
+                raise RuntimeError("No GPU delegate API available in this TensorFlow version")
             
             interp = tf.lite.Interpreter(
                 model_path=model_path,
@@ -271,11 +307,32 @@ def ensure_interpreter(model_path: str, use_gpu: bool = False) -> Interpreter:
                     # Add GPU delegate if requested and available
                     if use_gpu and GPU_AVAILABLE:
                         try:
-                            gpu_delegate = tf.lite.experimental.GpuDelegate(
-                                options={'precision_loss_allowed': True}
-                            )
-                            delegates.append(gpu_delegate)
-                            print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
+                            # Try to create GPU delegate - handle different TensorFlow versions
+                            gpu_delegate = None
+                            
+                            # Method 1: Try experimental API (TF 2.16.1 and some 2.20.0)
+                            try:
+                                if hasattr(tf.lite.experimental, 'GpuDelegate'):
+                                    gpu_delegate = tf.lite.experimental.GpuDelegate(
+                                        options={'precision_loss_allowed': True}
+                                    )
+                            except Exception:
+                                pass
+                            
+                            # Method 2: Try main tf.lite API
+                            if gpu_delegate is None and hasattr(tf.lite, 'GpuDelegate'):
+                                try:
+                                    gpu_delegate = tf.lite.GpuDelegate(
+                                        options={'precision_loss_allowed': True}
+                                    )
+                                except Exception:
+                                    pass
+                            
+                            if gpu_delegate:
+                                delegates.append(gpu_delegate)
+                                print(f"[FLEX-GPU] {Path(model_path).name} - Added GPU delegate")
+                            else:
+                                print(f"[FLEX-GPU-SKIP] {Path(model_path).name} - No GPU delegate API available")
                         except Exception as gpu_e:
                             print(f"[FLEX-GPU-SKIP] {Path(model_path).name} - GPU delegate failed: {gpu_e}")
                     
