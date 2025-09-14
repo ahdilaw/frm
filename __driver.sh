@@ -11,8 +11,9 @@ DATA_ARCHIVE_NAME="frm_code_static_250913.tar.gz"
 # --- Parse args ---
 BLAZE=""
 for arg in "$@"; do
-  case "$arg" in
-    --blaze) BLAZE="--blaze" ;;
+  case "$arg" i# Balanced approach: 2 warmup + 1 repeat for efficiency with minimal cold-start bias
+# With 1000 samples: 2k warmup inferences + 1k measurement inferences = good balance
+LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)    --blaze) BLAZE="--blaze" ;;
     *) echo "Unknown arg: $arg" >&2 ; exit 2 ;;
   esac
 done
@@ -412,10 +413,12 @@ log "Applying hygiene + snapshot… (locking GPU clocks best-effort)"
 python "$RUN_DIR/hygiene_apply_and_snapshot.py" | tee "$PROV_DIR/hygiene_post.json" >/dev/null
 deactivate || true
 
-# --- Common eval flags (Paper-grade benchmarking configuration)
+# --- Common eval flags (GPU pod optimized benchmarking configuration)
+# Efficient approach: Use first 50 samples as natural warmup, measure remaining 950
+# Analysis will discard first 50 measurements to eliminate cold-start bias
 LAT_FLAGS=(--latency --lat-warmup-batches 1 --lat-repeats-batch 1 --bs 1)
-MEM_FLAGS=(--mem --mem-sample-hz 100)
-ENERGY_FLAGS=(--energy --energy-sample-hz 100)
+MEM_FLAGS=(--mem --mem-sample-hz 500)  # 2ms intervals for fast GPU memory changes
+ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
 
 # --- ONNX eval (Torch/ONNX env)
 if [ -f "$ROOT/__eval_onnx_.py" ]; then
