@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: bash __driver.sh [--blaze]
+# Usage: bash __driver.sh [--blaze] [--run N]
 set -euo pipefail
 
 trap 'echo -e "[\e[31m$(date +'%H:%M:%S')\e[0m] ❌ Error on line $LINENO"; exit 1' ERR
@@ -10,24 +10,54 @@ DATA_ARCHIVE_NAME="frm_code_static_250913.tar.gz"
 
 # --- Parse args ---
 BLAZE=""
-for arg in "$@"; do
-  case "$arg" i# Balanced approach: 2 warmup + 1 repeat for efficiency with minimal cold-start bias
-# With 1000 samples: 2k warmup inferences + 1k measurement inferences = good balance
-LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)    --blaze) BLAZE="--blaze" ;;
-    *) echo "Unknown arg: $arg" >&2 ; exit 2 ;;
+RUN_COUNT=1
+SKIP_SETUP=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --blaze) 
+      BLAZE="--blaze" 
+      shift ;;
+    --run)
+      if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+        echo "Error: --run requires a positive integer" >&2
+        exit 2
+      fi
+      RUN_COUNT="$2"
+      shift 2 ;;
+    *) 
+      echo "Unknown arg: $1" >&2
+      echo "Usage: bash __driver.sh [--blaze] [--run N]" >&2
+      exit 2 ;;
   esac
 done
 
-TS="$(date -u +'%Y%m%dT%H%M%SZ')"
-ROOT="$(pwd)"
-RUN_DIR="$ROOT/runs/$TS"
-PROV_DIR="$RUN_DIR/provenance"
-LOG_DIR="$RUN_DIR/logs"
-RES_DIR="$RUN_DIR/results"
-VENV_OX="$RUN_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
-VENV_TFL="$RUN_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+log "Multiple runs requested: $RUN_COUNT"
+log "Arguments: BLAZE=$BLAZE"
 
-mkdir -p "$PROV_DIR" "$LOG_DIR" "$RES_DIR"
+# --- Setup paths and environments (once) ---
+BASE_TS="$(date -u +'%Y%m%dT%H%M%SZ')"
+ROOT="$(pwd)"
+SETUP_DIR="$ROOT/setup_$BASE_TS"
+VENV_OX="$SETUP_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
+VENV_TFL="$SETUP_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+
+mkdir -p "$SETUP_DIR"
+
+# --- Main execution function ---
+run_benchmark() {
+  local run_num=$1
+  local base_ts=$2
+  
+  TS="${base_ts}_run${run_num}"
+  RUN_DIR="$ROOT/runs/$TS"
+  PROV_DIR="$RUN_DIR/provenance"
+  LOG_DIR="$RUN_DIR/logs"
+  RES_DIR="$RUN_DIR/results"
+  
+  mkdir -p "$PROV_DIR" "$LOG_DIR" "$RES_DIR"
+  
+  log "=== Starting benchmark run $run_num/$RUN_COUNT ==="
 
 log()  { echo -e "[$(date +'%H:%M:%S')] $*"; }
 warn() { echo -e "[$(date +'%H:%M:%S')] ⚠ $*" >&2; }
@@ -161,157 +191,8 @@ except Exception as e:
   fi
 }
 
-# Download data and models
-download_data_models || {
-  warn "Failed to download/extract data and models. Continuing anyway..."
-}
-
-# --- Faster builds: use RAM tmp if present, prefer wheels
-if [ -d /dev/shm ]; then
-  export TMPDIR=/dev/shm
-  export PIP_CACHE_DIR=/dev/shm/pipcache
-fi
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PIP_DEFAULT_TIMEOUT=120
-PIP_OPTS="--prefer-binary"
-
-# --- System packages (best-effort; skip if container already has them)
-install_sysdeps() {
-  log "Installing system packages…"
-  if [ $HAS_APT -eq 1 ]; then
-    apt-get update -y || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      python3 python3-venv python3-pip python3-dev build-essential \
-      git wget curl unzip pkg-config \
-      libgl1 libglib2.0-0 \
-      libopenblas-dev liblapack-dev \
-      pciutils usbutils dmidecode lshw hwloc jq || true
-  elif [ $HAS_DNF -eq 1 ]; then
-    dnf install -y \
-      python3 python3-virtualenv python3-pip python3-devel @development-tools \
-      git wget curl unzip openblas-devel lapack-devel \
-      mesa-libGL glib2 \
-      pciutils usbutils dmidecode lshw hwloc jq || true
-  elif [ $HAS_PAC -eq 1 ]; then
-    pacman -Sy --noconfirm \
-      python python-virtualenv python-pip base-devel \
-      git wget curl unzip openblas lapack \
-      mesa glib2 \
-      pciutils usbutils dmidecode lshw hwloc jq || true
-  else
-    warn "No known package manager detected; assuming deps exist."
-  fi
-}
-install_sysdeps
-
-# --- Python venvs + deps
-# Torch/ONNX env (numpy > 2)
-log "Creating Torch/ONNX env…"
-python3 -m venv "$VENV_OX"
-"$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-"$VENV_OX/bin/pip" install $PIP_OPTS "numpy>2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
-
-# Torch + torchvision (try CUDA wheels first, fallback to CPU)
-if [ $HAS_NVIDIA -eq 1 ]; then
-  "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cu121 "torch>=1.13.0" "torchvision>=0.14.0" \
-  || "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
-else
-  "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
-fi
-# ONNX stack
-"$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17" "nvidia-ml-py3"
-# Optional
-"$VENV_OX/bin/pip" install $PIP_OPTS timm || true
-
-# --- TFLite/TF env (numpy < 2) ---
-log "Creating TFLite/TF env…"
-python3 -m venv "$VENV_TFL"
-"$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-"$VENV_TFL/bin/pip" install $PIP_OPTS "numpy>=1.21.0,<2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0" "nvidia-ml-py3"
-
-# torchvision (for transforms) — light use only
-if [ $HAS_NVIDIA -eq 1 ]; then
-  "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cu121 "torch>=1.13.0" "torchvision>=0.14.0" \
-  || "$VENV_TFL/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
-else
-  "$VENV_TFL/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
-fi
-
-# TensorFlow Lite setup - DISABLED for GPU pod benchmarking
-# TensorFlow Lite is designed for edge/mobile CPU inference, not GPU server workloads
-# For CPU baseline testing, enable this section and run on appropriate hardware
-
-# if [ $IS_PI -eq 1 ]; then
-#   "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
-# else
-#   if [ $HAS_NVIDIA -eq 1 ]; then
-#     # Use TensorFlow 2.15.1 with bundled CUDA - has stable TensorFlow Lite GPU delegates
-#     # TensorFlow 2.20.0 broke GPU delegates, but 2.15.1 works with both CUDA and GPU delegates
-#     "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow[and-cuda]==2.15.1" || {
-#       log "TensorFlow 2.15.1 with CUDA failed, trying CPU version..."
-#       "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu" || {
-#         log "TensorFlow CPU failed, trying tflite-runtime..."
-#         "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
-#       }
-#     }
-#   else
-#     "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow-cpu" || {
-#       log "TensorFlow CPU failed, trying tflite-runtime..."
-#       "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
-#     }
-#   fi
-#   
-#   "$VENV_TFL/bin/pip" install $PIP_OPTS "tflite-runtime>=2.13.0" || true
-# fi
-
-# # Verify TF import and TFLite interpreter availability
-# "$VENV_TFL/bin/python" - <<'PY'
-# import sys
-# 
-# # Test TensorFlow import
-# tf_ok = False
-# tflite_runtime_ok = False
-# interpreter_ok = False
-# 
-# try:
-#     import tensorflow as tf
-#     print("✓ TensorFlow OK:", tf.__version__)
-#     tf_ok = True
-#     
-#     # Test TFLite interpreter via TensorFlow
-#     try:
-#         interpreter = tf.lite.Interpreter
-#         print("✓ tf.lite.Interpreter available")
-#         interpreter_ok = True
-#     except AttributeError:
-#         print("✗ tf.lite.Interpreter not available")
-#     
-# except Exception as e:
-#     print("✗ TensorFlow import failed:", e)
-# 
-# # Test tflite-runtime fallback
-# try:
-#     from tflite_runtime.interpreter import Interpreter
-#     print("✓ tflite-runtime available")
-#     tflite_runtime_ok = True
-#     if not interpreter_ok:
-#         interpreter_ok = True
-#         print("✓ Using tflite-runtime as interpreter")
-# except Exception as e:
-#     print("✗ tflite-runtime import failed:", e)
-# 
-# if not interpreter_ok:
-#     print("❌ No TFLite interpreter available!")
-#     print("   Please check TensorFlow or tflite-runtime installation")
-#     sys.exit(1)
-# else:
-#     print("✅ TFLite interpreter ready")
-# PY
-
-log "TensorFlow Lite setup skipped - optimized for GPU server benchmarking"
-
 # --- Helper tools (device info + hygiene JSON)
-cat > "$RUN_DIR/device_info_collect.py" << 'PY'
+cat > "$SETUP_DIR/device_info_collect.py" << 'PY'
 import json, os, platform, subprocess, sys
 from datetime import datetime
 def sh(cmd):
@@ -367,7 +248,7 @@ for m in ["numpy","pandas","onnxruntime","onnx","torch","tensorflow","tflite_run
 print(json.dumps(out, indent=2))
 PY
 
-cat > "$RUN_DIR/hygiene_apply_and_snapshot.py" << 'PY'
+cat > "$SETUP_DIR/hygiene_apply_and_snapshot.py" << 'PY'
 import json, os, subprocess, re
 from datetime import datetime
 def sh(cmd):
@@ -405,29 +286,34 @@ snap["nvidia_smi"]=sh('nvidia-smi')
 print(json.dumps(snap, indent=2))
 PY
 
-# --- Collect device info + hygiene (Torch/ONNX env)
-log "Collecting device info JSON…"
-source "$VENV_OX/bin/activate"
-python "$RUN_DIR/device_info_collect.py" | tee "$PROV_DIR/device_info.json" >/dev/null
-log "Applying hygiene + snapshot… (locking GPU clocks best-effort)"
-python "$RUN_DIR/hygiene_apply_and_snapshot.py" | tee "$PROV_DIR/hygiene_post.json" >/dev/null
-deactivate || true
-
-# --- Common eval flags (GPU pod optimized benchmarking configuration)
-# Efficient approach: Use first 50 samples as natural warmup, measure remaining 950
-# Analysis will discard first 50 measurements to eliminate cold-start bias
-LAT_FLAGS=(--latency --lat-warmup-batches 1 --lat-repeats-batch 1 --bs 1)
-MEM_FLAGS=(--mem --mem-sample-hz 500)  # 2ms intervals for fast GPU memory changes
-ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
-
-# --- ONNX eval (Torch/ONNX env)
-if [ -f "$ROOT/__eval_onnx_.py" ]; then
-  log "ONNX eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
-  source "$VENV_OX/bin/activate"
+  # --- Helper scripts for this run
+  cp "$SETUP_DIR/device_info_collect.py" "$RUN_DIR/"
+  cp "$SETUP_DIR/hygiene_apply_and_snapshot.py" "$RUN_DIR/"
   
-  # Validate per-sample configuration
-  log "Validating per-sample inference configuration…"
-  if ! python -c "
+  # --- Collect device info + hygiene (Torch/ONNX env)
+  log "Collecting device info JSON…"
+  source "$VENV_OX/bin/activate"
+  python "$RUN_DIR/device_info_collect.py" | tee "$PROV_DIR/device_info.json" >/dev/null
+  log "Applying hygiene + snapshot… (locking GPU clocks best-effort)"
+  python "$RUN_DIR/hygiene_apply_and_snapshot.py" | tee "$PROV_DIR/hygiene_post.json" >/dev/null
+  deactivate || true
+
+  # --- Common eval flags (GPU pod optimized benchmarking configuration)
+  # Balanced approach: 2 warmup + 1 repeat for efficiency with minimal cold-start bias
+  # With 1000 samples: 2k warmup inferences + 1k measurement inferences = good balance
+  LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)
+  MEM_FLAGS=(--mem --mem-sample-hz 500)  # 2ms intervals for fast GPU memory changes
+  ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
+  ENERGY_FLAGS=(--energy --energy-sample-hz 300)  # 3.3ms intervals for power spikes
+
+  # --- ONNX eval (Torch/ONNX env)
+  if [ -f "$ROOT/__eval_onnx_.py" ]; then
+    log "ONNX eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
+    source "$VENV_OX/bin/activate"
+    
+    # Validate per-sample configuration
+    log "Validating per-sample inference configuration…"
+    if ! python -c "
 import sys
 # Verify batch size is 1 for true per-sample inference
 args = sys.argv[1:]
@@ -437,79 +323,155 @@ if bs_idx is None or int(args[bs_idx + 1]) != 1:
     sys.exit(1)
 print('✓ Per-sample configuration validated')
 " "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE; then
-    warn "Per-sample validation failed"
+      warn "Per-sample validation failed"
+      deactivate || true
+      return 1
+    fi
+    
+    python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
     deactivate || true
-    exit 1
+    mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
   fi
+
+  # --- TFLite eval - DISABLED for GPU pod benchmarking
+  log "TensorFlow Lite evaluation skipped - optimized for GPU server benchmarking"
+
+  # --- PyTorch eval (Torch/ONNX env)
+  if [ -f "$ROOT/__eval_torch_.py" ]; then
+    log "PyTorch eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
+    source "$VENV_OX/bin/activate"
+    python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
+    deactivate || true
+    mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
+  fi
+
+  # --- Package results
+  log "Validating benchmark results…"
+  RESULTS_FOUND=0
+  for res_file in "$RES_DIR"/*.ods; do
+    if [ -f "$res_file" ]; then
+      RESULTS_FOUND=$((RESULTS_FOUND + 1))
+      log "✓ Found result: $(basename "$res_file")"
+    fi
+  done
+
+  if [ $RESULTS_FOUND -eq 0 ]; then
+    warn "No result files found! Benchmark may have failed."
+    return 1
+  else
+    log "✓ $RESULTS_FOUND result file(s) generated successfully"
+  fi
+
+  log "Packaging results…"
+  tar -C "$RUN_DIR" -czf "$ROOT/results_$TS.tar.gz" provenance logs results
+  log "Benchmark run $run_num complete: $ROOT/results_$TS.tar.gz"
+  log "Configuration: warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference (bs=1)"
   
-  python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
-  deactivate || true
-  mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
+  log "=== Finished benchmark run $run_num/$RUN_COUNT ==="
+  return 0
+}
+
+# --- Main execution: setup once, run multiple times ---
+log "Setting up environments (once)…"
+
+# Download data and models
+download_data_models || {
+  warn "Failed to download/extract data and models. Continuing anyway..."
+}
+
+# --- Faster builds: use RAM tmp if present, prefer wheels
+if [ -d /dev/shm ]; then
+  export TMPDIR=/dev/shm
+  export PIP_CACHE_DIR=/dev/shm/pipcache
 fi
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=120
+PIP_OPTS="--prefer-binary"
 
-# --- TFLite eval - DISABLED for GPU pod benchmarking
-# TensorFlow Lite is optimized for edge/mobile CPU inference
-# For CPU baseline testing, uncomment this section and ensure TFLite environment is set up
+# --- System packages (best-effort; skip if container already has them)
+install_sysdeps() {
+  log "Installing system packages…"
+  if [ $HAS_APT -eq 1 ]; then
+    apt-get update -y || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      python3 python3-venv python3-pip python3-dev build-essential \
+      git wget curl unzip pkg-config \
+      libgl1 libglib2.0-0 \
+      libopenblas-dev liblapack-dev \
+      pciutils usbutils dmidecode lshw hwloc jq || true
+  elif [ $HAS_DNF -eq 1 ]; then
+    dnf install -y \
+      python3 python3-virtualenv python3-pip python3-devel @development-tools \
+      git wget curl unzip openblas-devel lapack-devel \
+      mesa-libGL glib2 \
+      pciutils usbutils dmidecode lshw hwloc jq || true
+  elif [ $HAS_PAC -eq 1 ]; then
+    pacman -Sy --noconfirm \
+      python python-virtualenv python-pip base-devel \
+      git wget curl unzip openblas lapack \
+      mesa glib2 \
+      pciutils usbutils dmidecode lshw hwloc jq || true
+  else
+    warn "No known package manager detected; assuming deps exist."
+  fi
+}
+install_sysdeps
 
-# if [ -f "$ROOT/__eval_tflite_.py" ]; then
-#   log "TFLite eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
-#   TFL_FLAGS=()
-#   if [ $HAS_NVIDIA -eq 1 ]; then
-#     TF_GPU_OK="$("$VENV_TFL/bin/python" - <<'PY'
-# ok=0
-# try:
-#     import tensorflow as tf
-#     # Check for both TF config and TFLite Interpreter
-#     has_config = hasattr(tf, "config") and callable(getattr(tf.config, "list_physical_devices", None))
-#     has_interpreter = hasattr(tf, "lite") and hasattr(tf.lite, "Interpreter")
-#     ok = has_config and has_interpreter
-#     if ok:
-#         print("1")  # GPU delegate available
-#     else:
-#         print("0")  # No GPU delegate
-# except Exception:
-#     print("0")
-# PY
-# )"
-#     if [ "$TF_GPU_OK" = "1" ]; then
-#       TFL_FLAGS+=(--gpu)
-#       log "GPU delegate enabled for TFLite"
-#     fi
-#   fi
-#   source "$VENV_TFL/bin/activate"
-#   python "$ROOT/__eval_tflite_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" "${TFL_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/tflite.log"
-#   deactivate || true
-#   mv -f frm_tflite_results.ods "$RES_DIR/frm_tflite_results.ods" 2>/dev/null || true
-# fi
+# --- Python venvs + deps (setup once)
+# Torch/ONNX env (numpy > 2)
+log "Creating Torch/ONNX env…"
+python3 -m venv "$VENV_OX"
+"$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+"$VENV_OX/bin/pip" install $PIP_OPTS "numpy>2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
 
-log "TensorFlow Lite evaluation skipped - optimized for GPU server benchmarking"
-
-# --- PyTorch eval (Torch/ONNX env)
-if [ -f "$ROOT/__eval_torch_.py" ]; then
-  log "PyTorch eval… (warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference)"
-  source "$VENV_OX/bin/activate"
-  python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
-  deactivate || true
-  mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
+# Torch + torchvision (try CUDA wheels first, fallback to CPU)
+if [ $HAS_NVIDIA -eq 1 ]; then
+  "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cu121 "torch>=1.13.0" "torchvision>=0.14.0" \
+  || "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
+else
+  "$VENV_OX/bin/pip" install $PIP_OPTS "torch>=1.13.0" "torchvision>=0.14.0"
 fi
+# ONNX stack
+"$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime-gpu; platform_system=='Linux'" "onnxruntime; platform_system!='Linux'" "onnxsim>=0.4.17" "nvidia-ml-py3"
+# Optional
+"$VENV_OX/bin/pip" install $PIP_OPTS timm || true
 
-# --- Package results
-log "Validating benchmark results…"
-RESULTS_FOUND=0
-for res_file in "$RES_DIR"/*.ods; do
-  if [ -f "$res_file" ]; then
-    RESULTS_FOUND=$((RESULTS_FOUND + 1))
-    log "✓ Found result: $(basename "$res_file")"
+log "TensorFlow Lite setup skipped - optimized for GPU server benchmarking"
+
+# --- Execute benchmark runs ---
+FAILED_RUNS=0
+SUCCESS_COUNT=0
+
+for ((i=1; i<=RUN_COUNT; i++)); do
+  log "Starting benchmark run $i of $RUN_COUNT"
+  if run_benchmark "$i" "$BASE_TS"; then
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    log "✓ Run $i completed successfully"
+  else
+    FAILED_RUNS=$((FAILED_RUNS + 1))
+    warn "✗ Run $i failed"
   fi
 done
 
-if [ $RESULTS_FOUND -eq 0 ]; then
-  warn "No result files found! Benchmark may have failed."
-else
-  log "✓ $RESULTS_FOUND result file(s) generated successfully"
-fi
+# --- Final summary ---
+log "=== BENCHMARK SUMMARY ==="
+log "Requested runs: $RUN_COUNT"
+log "Successful runs: $SUCCESS_COUNT"
+log "Failed runs: $FAILED_RUNS"
 
-log "Packaging results…"
-tar -C "$RUN_DIR" -czf "$ROOT/results_$TS.tar.gz" provenance logs results
-log "Paper-grade benchmark complete: $ROOT/results_$TS.tar.gz"
-log "Benchmark configuration: warmup=${LAT_FLAGS[2]}, repeats=${LAT_FLAGS[4]}, per-sample inference (bs=1)"
+if [ $SUCCESS_COUNT -gt 0 ]; then
+  log "Result files:"
+  find "$ROOT" -name "results_${BASE_TS}_run*.tar.gz" -exec basename {} \; | sort
+  log "✅ Multi-run benchmark complete!"
+  
+  if [ $RUN_COUNT -gt 1 ]; then
+    log "For averaging analysis:"
+    log "  - Extract all result files"
+    log "  - Combine latency measurements from each run"
+    log "  - Calculate mean ± std dev across runs"
+    log "  - Report final averaged performance metrics"
+  fi
+else
+  warn "❌ All benchmark runs failed!"
+  exit 1
+fi
