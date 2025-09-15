@@ -492,20 +492,31 @@ if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
 fi
 
 if [[ $USE_TFLITE -eq 1 ]]; then
-  log "Creating TensorFlow Lite env…"
-  python3 -m venv "$VENV_TFL"
-  "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-  "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
-  
-  # Try tflite-runtime first, fall back to tensorflow-cpu if needed
-  log "Installing TensorFlow Lite runtime..."
-  if ! "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
-    log "tflite-runtime not available (likely Python 3.13+), falling back to tensorflow-cpu..."
-    "$VENV_TFL/bin/pip" install $PIP_OPTS tensorflow-cpu
+  # Check if TensorFlow is already available globally
+  if python3 -c "import tensorflow as tf; print(f'TensorFlow {tf.__version__} available')" 2>/dev/null; then
+    log "✓ Using globally installed TensorFlow $(python3 -c "import tensorflow as tf; print(tf.__version__)" 2>/dev/null)"
+    # Create a minimal venv that uses global TensorFlow
+    python3 -m venv "$VENV_TFL" --system-site-packages
+    "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+    # Only install packages not available globally
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
+    "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
+  else
+    log "Creating TensorFlow Lite env (no global TensorFlow found)…"
+    python3 -m venv "$VENV_TFL"
+    "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
+    
+    # Try tflite-runtime first, fall back to tensorflow-cpu if needed
+    log "Installing TensorFlow Lite runtime..."
+    if ! "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
+      log "tflite-runtime not available (likely Python 3.13+), falling back to tensorflow-cpu..."
+      "$VENV_TFL/bin/pip" install $PIP_OPTS tensorflow-cpu
+    fi
+    
+    # Add torchvision for transforms (CPU-only)
+    "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
   fi
-  
-  # Add torchvision for transforms (CPU-only)
-  "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
 fi
 
 # --- Execute benchmark runs ---
