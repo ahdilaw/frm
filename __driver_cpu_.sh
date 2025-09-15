@@ -476,17 +476,17 @@ if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
   log "Creating Torch/ONNX env…"
   python3 -m venv "$VENV_OX"
   "$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-  "$VENV_OX/bin/pip" install $PIP_OPTS "numpy>2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
+  "$VENV_OX/bin/pip" install $PIP_OPTS numpy pandas Pillow tqdm odfpy openpyxl
 
   if [[ $USE_TORCH -eq 1 ]]; then
     # Torch + torchvision (CPU-only)
-    "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu "torch>=1.13.0" "torchvision>=0.14.0"
+    "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision
     "$VENV_OX/bin/pip" install $PIP_OPTS timm || true
   fi
   
   if [[ $USE_ONNX -eq 1 ]]; then
     # ONNX stack (CPU-only)
-    "$VENV_OX/bin/pip" install $PIP_OPTS "onnx>=1.12.0" "onnxruntime>=1.12.0" "onnxsim>=0.4.17"
+    "$VENV_OX/bin/pip" install $PIP_OPTS onnx onnxruntime onnxsim
   fi
 fi
 
@@ -494,8 +494,8 @@ if [[ $USE_TFLITE -eq 1 ]]; then
   log "Creating TensorFlow Lite env…"
   python3 -m venv "$VENV_TFL"
   "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-  "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" "pandas>=1.5.0" "Pillow>=9.0.0" "tqdm>=4.64.0" "odfpy>=1.4.0" "openpyxl>=3.0.0"
-  "$VENV_TFL/bin/pip" install $PIP_OPTS "tensorflow>=2.10.0" "tflite-runtime>=2.10.0"
+  "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
+  "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
 fi
 
 # --- Execute benchmark runs ---
