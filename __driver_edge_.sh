@@ -663,13 +663,80 @@ print('Note: RPi4 VideoCore VI GPU is not supported by TFLite GPU delegate')
   "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
 fi
 
+# --- Thermal-aware benchmark execution function ---
+run_benchmark_with_thermal() {
+  local run_num=$1
+  local base_ts=$2
+  
+  if [ $IS_PI -eq 1 ]; then
+    # RPi4 thermal management
+    log "🌡️  Checking thermal state before run $run_num..."
+    
+    # Pre-benchmark thermal check
+    TEMP_BEFORE=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "0")
+    TEMP_BEFORE_C=$((TEMP_BEFORE / 1000))
+    
+    log "Pre-benchmark temperature: ${TEMP_BEFORE_C}°C"
+    
+    # Wait for cooldown if too hot
+    if [ $TEMP_BEFORE_C -gt 75 ]; then
+      warn "🔥 Temperature too high (${TEMP_BEFORE_C}°C). Waiting for cooldown..."
+      while [ $TEMP_BEFORE_C -gt 70 ]; do
+        sleep 30
+        TEMP_BEFORE=$(cat /sys/class/thermal/thermal_zone0/temp)
+        TEMP_BEFORE_C=$((TEMP_BEFORE / 1000))
+        log "Current temp: ${TEMP_BEFORE_C}°C (waiting for <70°C)"
+      done
+    fi
+    
+    # Start thermal monitoring in background
+    (
+      while true; do
+        thermal_data=$(check_thermal_state)
+        echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"run\":$run_num,$thermal_data}" >> "$ROOT/thermal_log_${base_ts}_run${run_num}.jsonl"
+        sleep 5
+      done
+    ) &
+    THERMAL_PID=$!
+    
+    # Run actual benchmark
+    run_benchmark "$run_num" "$base_ts"
+    local result=$?
+    
+    # Stop thermal monitoring
+    kill $THERMAL_PID 2>/dev/null || true
+    
+    # Post-benchmark thermal report
+    TEMP_AFTER=$(cat /sys/class/thermal/thermal_zone0/temp)
+    TEMP_AFTER_C=$((TEMP_AFTER / 1000))
+    TEMP_DELTA=$((TEMP_AFTER_C - TEMP_BEFORE_C))
+    log "🌡️  Post-benchmark temperature: ${TEMP_AFTER_C}°C (Δ: ${TEMP_DELTA}°C)"
+    
+    # Check for throttling during benchmark
+    if command -v vcgencmd >/dev/null 2>&1; then
+      THROTTLE_STATUS=$(vcgencmd get_throttled 2>/dev/null || echo "throttled=0x0")
+      if [ "$THROTTLE_STATUS" != "throttled=0x0" ]; then
+        warn "⚠️  Throttling detected during benchmark: $THROTTLE_STATUS"
+        warn "Consider improving cooling or reducing test intensity"
+      else
+        log "✓ No thermal throttling detected"
+      fi
+    fi
+    
+    return $result
+  else
+    # Regular benchmark execution for non-RPi
+    run_benchmark "$run_num" "$base_ts"
+  fi
+}
+
 # --- Execute benchmark runs ---
 FAILED_RUNS=0
 SUCCESS_COUNT=0
 
 for ((i=1; i<=RUN_COUNT; i++)); do
   log "Starting benchmark run $i of $RUN_COUNT"
-  if run_benchmark "$i" "$BASE_TS"; then
+  if run_benchmark_with_thermal "$i" "$BASE_TS"; then
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     log "✓ Run $i completed successfully"
   else
