@@ -395,18 +395,29 @@ PY
   # --- Package results
   log "Validating benchmark results…"
   RESULTS_FOUND=0
-  for res_file in "$RES_DIR"/*.ods; do
-    if [ -f "$res_file" ]; then
-      RESULTS_FOUND=$((RESULTS_FOUND + 1))
-      log "✓ Found result: $(basename "$res_file")"
-    fi
-  done
+  EXPECTED_RESULTS=0
+  
+  # Count expected results based on enabled frameworks
+  [[ $USE_ONNX -eq 1 ]] && EXPECTED_RESULTS=$((EXPECTED_RESULTS + 1))
+  [[ $USE_TORCH -eq 1 ]] && EXPECTED_RESULTS=$((EXPECTED_RESULTS + 1))
+  [[ $USE_TFLITE -eq 1 ]] && EXPECTED_RESULTS=$((EXPECTED_RESULTS + 1))
+  
+  # Check for actual result files
+  [[ -f "$RES_DIR/frm_onnx_results.ods" ]] && RESULTS_FOUND=$((RESULTS_FOUND + 1)) && log "✓ Found result: frm_onnx_results.ods"
+  [[ -f "$RES_DIR/frm_torch_results.ods" ]] && RESULTS_FOUND=$((RESULTS_FOUND + 1)) && log "✓ Found result: frm_torch_results.ods"
+  [[ -f "$RES_DIR/frm_tflite_results.ods" ]] && RESULTS_FOUND=$((RESULTS_FOUND + 1)) && log "✓ Found result: frm_tflite_results.ods"
 
   if [ $RESULTS_FOUND -eq 0 ]; then
     warn "No result files found! Benchmark may have failed."
     return 1
+  elif [ $RESULTS_FOUND -lt $EXPECTED_RESULTS ]; then
+    warn "Only $RESULTS_FOUND of $EXPECTED_RESULTS expected result files found!"
+    [[ $USE_ONNX -eq 1 && ! -f "$RES_DIR/frm_onnx_results.ods" ]] && warn "Missing: ONNX results"
+    [[ $USE_TORCH -eq 1 && ! -f "$RES_DIR/frm_torch_results.ods" ]] && warn "Missing: PyTorch results"
+    [[ $USE_TFLITE -eq 1 && ! -f "$RES_DIR/frm_tflite_results.ods" ]] && warn "Missing: TFLite results"
+    return 1
   else
-    log "✓ $RESULTS_FOUND result file(s) generated successfully"
+    log "✓ All $RESULTS_FOUND expected result file(s) generated successfully"
   fi
 
   log "Packaging results…"
@@ -486,6 +497,8 @@ if [[ $USE_TFLITE -eq 1 ]]; then
   "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
   "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
   "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
+  # Add torchvision for transforms (CPU-only)
+  "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
 fi
 
 # --- Execute benchmark runs ---
