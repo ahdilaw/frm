@@ -335,16 +335,6 @@ PY
   MEM_FLAGS=(--mem --mem-sample-hz 500)
   ENERGY_FLAGS=(--energy --energy-sample-hz 300)
 
-  # --- Check taskset availability and setup CPU affinity
-  TASKSET_CMD=""
-  if command -v taskset >/dev/null 2>&1; then
-    TASKSET_CMD="taskset -c 0"
-    log "✓ Using CPU affinity: taskset -c 0 (pinning to CPU core 0)"
-  else
-    warn "taskset not available - running without CPU affinity pinning"
-    TASKSET_CMD=""
-  fi
-  
   log "Threading configuration: OMP_NUM_THREADS=1, TORCH_NUM_THREADS=1, TF_NUM_INTRAOP_THREADS=1"
   log "SMT status: $(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo 'unknown')"
 
@@ -356,7 +346,7 @@ PY
     if [ -f "$ROOT/__eval_onnx_.py" ]; then
       log "ONNX eval (run $run_num)…"
       source "$VENV_OX/bin/activate"
-      $TASKSET_CMD python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
+      python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
       deactivate || true
       mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
     fi
@@ -365,7 +355,7 @@ PY
     if [ -f "$ROOT/__eval_torch_.py" ]; then
       log "PyTorch eval (run $run_num)…"
       source "$VENV_OX/bin/activate"
-      $TASKSET_CMD python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
+      python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
       deactivate || true
       mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
     fi
@@ -375,7 +365,7 @@ PY
     if [ -f "$ROOT/__eval_onnx_.py" ]; then
       log "ONNX eval (run $run_num)…"
       source "$VENV_OX/bin/activate"
-      $TASKSET_CMD python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
+      python "$ROOT/__eval_onnx_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/onnx.log"
       deactivate || true
       mv -f frm_onnx_results.ods "$RES_DIR/frm_onnx_results.ods" 2>/dev/null || true
     fi
@@ -385,7 +375,7 @@ PY
     if [ -f "$ROOT/__eval_torch_.py" ]; then
       log "PyTorch eval (run $run_num)…"
       source "$VENV_OX/bin/activate"
-      $TASKSET_CMD python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
+      python "$ROOT/__eval_torch_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/torch.log"
       deactivate || true
       mv -f frm_torch_results.ods "$RES_DIR/frm_torch_results.ods" 2>/dev/null || true
     fi
@@ -396,7 +386,7 @@ PY
     if [ -f "$ROOT/__eval_tflite_.py" ]; then
       log "TensorFlow Lite eval (run $run_num)…"
       source "$VENV_TFL/bin/activate"
-      $TASKSET_CMD python "$ROOT/__eval_tflite_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/tflite.log"
+      python "$ROOT/__eval_tflite_.py" "${LAT_FLAGS[@]}" "${MEM_FLAGS[@]}" "${ENERGY_FLAGS[@]}" $BLAZE | tee "$LOG_DIR/tflite.log"
       deactivate || true
       mv -f frm_tflite_results.ods "$RES_DIR/frm_tflite_results.ods" 2>/dev/null || true
     fi
