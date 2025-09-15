@@ -71,6 +71,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- Helper functions ---
+log()  { echo -e "[\e[32m$(date +'%H:%M:%S')\e[0m] $*"; }
+warn() { echo -e "[\e[33m$(date +'%H:%M:%S')\e[0m] ⚠ $*" >&2; }
+
+# --- System detection ---
+OS_ID="unknown"; OS_VER=""; ARCH="$(uname -m)"
+if [ -f /etc/os-release ]; then . /etc/os-release || true; OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-}"; fi
+HAS_APT=0; command -v apt-get  >/dev/null 2>&1 && HAS_APT=1
+HAS_DNF=0; command -v dnf      >/dev/null 2>&1 && HAS_DNF=1
+HAS_PAC=0; command -v pacman   >/dev/null 2>&1 && HAS_PAC=1
+HAS_ROCM=0; command -v rocm-smi >/dev/null 2>&1 && HAS_ROCM=1
+IS_PI=0; grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null && IS_PI=1
+
 # If no framework specified, enable all
 if [[ $USE_TFLITE -eq 0 && $USE_ONNX -eq 0 && $USE_TORCH -eq 0 ]]; then
   USE_TFLITE=1
@@ -90,19 +103,6 @@ if [ $IS_PI -eq 1 ]; then
     log "✓ Enabled TFLite + ONNX for RPi4 edge testing"
   fi
 fi
-
-# --- Helper functions ---
-log()  { echo -e "[\e[32m$(date +'%H:%M:%S')\e[0m] $*"; }
-warn() { echo -e "[\e[33m$(date +'%H:%M:%S')\e[0m] ⚠ $*" >&2; }
-
-# --- System detection ---
-OS_ID="unknown"; OS_VER=""; ARCH="$(uname -m)"
-if [ -f /etc/os-release ]; then . /etc/os-release || true; OS_ID="${ID:-unknown}"; OS_VER="${VERSION_ID:-}"; fi
-HAS_APT=0; command -v apt-get  >/dev/null 2>&1 && HAS_APT=1
-HAS_DNF=0; command -v dnf      >/dev/null 2>&1 && HAS_DNF=1
-HAS_PAC=0; command -v pacman   >/dev/null 2>&1 && HAS_PAC=1
-HAS_ROCM=0; command -v rocm-smi >/dev/null 2>&1 && HAS_ROCM=1
-IS_PI=0; grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null && IS_PI=1
 
 log "Multiple runs requested: $RUN_COUNT"
 log "Frameworks: TFLite=$USE_TFLITE ONNX=$USE_ONNX Torch=$USE_TORCH BLAZE=$BLAZE"
