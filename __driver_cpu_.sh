@@ -331,9 +331,9 @@ PY
   fi
 
   # --- Common eval flags
-  LAT_FLAGS=(--latency --lat-warmup-batches 2 --lat-repeats-batch 1 --bs 1)
-  MEM_FLAGS=(--mem --mem-sample-hz 500)
-  ENERGY_FLAGS=(--energy --energy-sample-hz 300)
+  LAT_FLAGS=(--latency --lat-warmup-batches 0 --lat-repeats-batch 0 --bs 1)
+  MEM_FLAGS=(--mem --mem-sample-hz 200)
+  ENERGY_FLAGS=(--energy --energy-sample-hz 200)
 
   log "Threading configuration: OMP_NUM_THREADS=1, TORCH_NUM_THREADS=1, TF_NUM_INTRAOP_THREADS=1"
   log "SMT status: $(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo 'unknown')"
