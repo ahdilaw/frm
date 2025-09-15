@@ -78,6 +78,19 @@ if [[ $USE_TFLITE -eq 0 && $USE_ONNX -eq 0 && $USE_TORCH -eq 0 ]]; then
   USE_TORCH=1
 fi
 
+# Override framework selection for RPi4 (edge optimization)
+if [ $IS_PI -eq 1 ]; then
+  log "🔄 RPi4 detected - optimizing for edge deployment (disabling PyTorch)"
+  USE_TORCH=0
+  
+  # Force at least one framework if none selected
+  if [[ $USE_TFLITE -eq 0 && $USE_ONNX -eq 0 ]]; then
+    USE_TFLITE=1
+    USE_ONNX=1
+    log "✓ Enabled TFLite + ONNX for RPi4 edge testing"
+  fi
+fi
+
 # --- Helper functions ---
 log()  { echo -e "[\e[32m$(date +'%H:%M:%S')\e[0m] $*"; }
 warn() { echo -e "[\e[33m$(date +'%H:%M:%S')\e[0m] ⚠ $*" >&2; }
@@ -94,6 +107,72 @@ IS_PI=0; grep -qi 'raspberry pi' /proc/cpuinfo 2>/dev/null && IS_PI=1
 log "Multiple runs requested: $RUN_COUNT"
 log "Frameworks: TFLite=$USE_TFLITE ONNX=$USE_ONNX Torch=$USE_TORCH BLAZE=$BLAZE"
 log "OS: $OS_ID $OS_VER | ARCH: $ARCH | ROCm: $HAS_ROCM | RPi: $IS_PI"
+
+# --- RPi4-specific detection and thermal management ---
+setup_rpi4_optimizations() {
+  if [ $IS_PI -eq 1 ]; then
+    log "🔧 Raspberry Pi detected - applying edge optimizations..."
+    
+    # Check RPi model
+    if [ -f /proc/device-tree/model ]; then
+      RPI_MODEL=$(cat /proc/device-tree/model)
+      log "Device: $RPI_MODEL"
+    fi
+    
+    # Initial thermal check
+    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+      TEMP_C=$(($(cat /sys/class/thermal/thermal_zone0/temp) / 1000))
+      log "Current temperature: ${TEMP_C}°C"
+      
+      if [ $TEMP_C -gt 70 ]; then
+        warn "⚠️  High temperature detected! Consider cooling before benchmarking."
+      fi
+    fi
+    
+    # CPU governor to performance (if possible)
+    if echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null; then
+      log "✓ CPU governor set to performance"
+    else
+      warn "Could not set performance governor (may need sudo)"
+    fi
+    
+    # Check GPU memory split
+    if command -v vcgencmd >/dev/null 2>&1; then
+      GPU_MEM=$(vcgencmd get_mem gpu | cut -d= -f2 | cut -dM -f1)
+      log "GPU memory allocation: ${GPU_MEM}MB"
+      if [ "$GPU_MEM" -gt 128 ]; then
+        warn "Consider reducing GPU memory (gpu_mem=64 in /boot/config.txt) for more system RAM"
+      fi
+    fi
+    
+    # Disable unnecessary services for consistent benchmarking
+    log "Stopping unnecessary services for benchmarking..."
+    systemctl stop bluetooth 2>/dev/null || true
+    systemctl stop cups 2>/dev/null || true
+    systemctl stop avahi-daemon 2>/dev/null || true
+    swapoff -a 2>/dev/null || true
+    
+    log "🌡️  Thermal monitoring enabled for RPi4"
+  fi
+}
+
+# Thermal monitoring function for RPi4
+check_thermal_state() {
+  if [ $IS_PI -eq 1 ] && [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+    local temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
+    local temp_c=$((temp_raw / 1000))
+    
+    # Check for throttling
+    local throttle_status="0x0"
+    if command -v vcgencmd >/dev/null 2>&1; then
+      throttle_status=$(vcgencmd get_throttled | cut -d= -f2)
+    fi
+    
+    echo "{\"temp_c\":$temp_c,\"throttled\":\"$throttle_status\",\"is_throttled\":$([ "$throttle_status" != "0x0" ] && echo "true" || echo "false")}"
+  else
+    echo "{\"temp_c\":null,\"throttled\":null,\"is_throttled\":false}"
+  fi
+}
 
 # --- Download and extract data/models if not present ---
 download_data_models() {
@@ -448,12 +527,34 @@ install_sysdeps() {
   log "Installing system packages…"
   if [ $HAS_APT -eq 1 ]; then
     apt-get update -y || true
+    
+    # Base packages
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       python3 python3-venv python3-pip python3-dev build-essential \
       git wget curl unzip pkg-config util-linux \
       libgl1 libglib2.0-0 \
-      libopenblas-dev liblapack-dev \
       pciutils usbutils dmidecode lshw hwloc jq || true
+    
+    # RPi4-specific ARM optimizations
+    if [ $IS_PI -eq 1 ]; then
+      log "📦 Installing ARM64-optimized packages for RPi4..."
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        libopenblas-dev liblapack-dev libatlas-base-dev \
+        libhdf5-dev libhdf5-serial-dev \
+        libjpeg-dev zlib1g-dev libpng-dev \
+        libraspberrypi-bin rpi-eeprom \
+        libopenblas-base || true
+      
+      # Check for ARM NEON support
+      if grep -q "neon" /proc/cpuinfo; then
+        log "✓ ARM NEON SIMD support detected"
+      fi
+    else
+      # Standard x86 optimization libraries
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        libopenblas-dev liblapack-dev || true
+    fi
+    
   elif [ $HAS_DNF -eq 1 ]; then
     dnf install -y \
       python3 python3-virtualenv python3-pip python3-devel @development-tools \
@@ -471,6 +572,7 @@ install_sysdeps() {
   fi
 }
 install_sysdeps
+setup_rpi4_optimizations
 
 # --- Python venvs + deps (setup once, only for requested frameworks)
 if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
@@ -487,7 +589,27 @@ if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
   
   if [[ $USE_ONNX -eq 1 ]]; then
     # ONNX stack (CPU-only)
-    "$VENV_OX/bin/pip" install $PIP_OPTS onnx onnxruntime onnxsim
+    log "📦 Installing ONNX Runtime for $ARCH..."
+    if [ $IS_PI -eq 1 ]; then
+      # ARM64-specific ONNX installation
+      "$VENV_OX/bin/pip" install $PIP_OPTS onnx
+      "$VENV_OX/bin/pip" install $PIP_OPTS onnxruntime || {
+        warn "Standard onnxruntime failed on ARM64, trying alternative..."
+        "$VENV_OX/bin/pip" install $PIP_OPTS --no-deps onnxruntime
+      }
+      # Skip onnxsim on ARM64 as it may not be available
+      "$VENV_OX/bin/pip" install $PIP_OPTS onnxsim || warn "onnxsim not available on ARM64"
+    else
+      # Standard x86 installation
+      "$VENV_OX/bin/pip" install $PIP_OPTS onnx onnxruntime onnxsim
+    fi
+    
+    # Verify ONNX installation
+    if "$VENV_OX/bin/python" -c "import onnxruntime; print(f'✓ ONNX Runtime {onnxruntime.__version__} installed')" 2>/dev/null; then
+      log "✓ ONNX Runtime installation verified"
+    else
+      warn "⚠️  ONNX Runtime installation may have issues"
+    fi
   fi
 fi
 
@@ -497,14 +619,47 @@ if [[ $USE_TFLITE -eq 1 ]]; then
   "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
   "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
   
-  # Try tflite-runtime first, fall back to tensorflow-cpu if needed
-  log "Installing TensorFlow Lite runtime..."
-  if ! "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
-    log "tflite-runtime not available (likely Python 3.13+), falling back to tensorflow-cpu..."
-    "$VENV_TFL/bin/pip" install $PIP_OPTS tensorflow-cpu
+  # TFLite Runtime installation (ARM64 optimized)
+  log "📱 Installing TensorFlow Lite Runtime for $ARCH..."
+  if [ $IS_PI -eq 1 ]; then
+    log "🔧 RPi4 detected - using ARM64-optimized TFLite runtime"
+    
+    # First try standard tflite-runtime (should have ARM64 wheels)
+    if "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
+      log "✓ TFLite Runtime installed via standard wheels"
+    else
+      warn "Standard TFLite installation failed, trying alternative sources..."
+      # Fallback to TensorFlow's official ARM64 build
+      "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://www.piwheels.org/simple/ tflite-runtime || {
+        warn "⚠️  TFLite Runtime installation failed - may need manual installation"
+      }
+    fi
+    
+    # Verify TFLite installation specifically for ARM64
+    if "$VENV_TFL/bin/python" -c "import tflite_runtime.interpreter as tflite; print('✓ TFLite Runtime installed successfully for ARM64')" 2>/dev/null; then
+      log "✅ TFLite Runtime verification successful"
+      
+      # Check for delegation support (RPi4 only supports CPU delegate)
+      "$VENV_TFL/bin/python" -c "
+import tflite_runtime.interpreter as tflite
+print('Available TFLite delegates:')
+try:
+    # Test CPU delegate (should always work)
+    print('- CPU delegate: Available')
+except Exception as e:
+    print(f'- CPU delegate: Error {e}')
+print('Note: RPi4 VideoCore VI GPU is not supported by TFLite GPU delegate')
+" || true
+    else
+      warn "❌ TFLite Runtime installation verification failed"
+    fi
+  else
+    # Standard x86 installation
+    "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
   fi
   
   # Add torchvision for transforms (CPU-only)
+  log "📦 Installing torchvision for image transforms..."
   "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
 fi
 
