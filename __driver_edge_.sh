@@ -145,12 +145,30 @@ setup_rpi4_optimizations() {
       fi
     fi
     
-    # Disable unnecessary services for consistent benchmarking
-    log "Stopping unnecessary services for benchmarking..."
-    systemctl stop bluetooth 2>/dev/null || true
-    systemctl stop cups 2>/dev/null || true
-    systemctl stop avahi-daemon 2>/dev/null || true
+    # Disable swap if present (can cause inconsistent performance)
     swapoff -a 2>/dev/null || true
+    
+    # RPi4 memory optimization for benchmarking
+    if [ $IS_PI -eq 1 ]; then
+      log "🧠 Applying RPi4 memory optimizations..."
+      
+      # Increase swap temporarily for heavy model loading (if no swap exists)
+      if ! swapon --show | grep -q "/"; then
+        log "Creating temporary swap for model loading..."
+        dd if=/dev/zero of=/tmp/benchmark_swap bs=1M count=1024 2>/dev/null || true
+        mkswap /tmp/benchmark_swap 2>/dev/null || true
+        swapon /tmp/benchmark_swap 2>/dev/null || true
+      fi
+      
+      # Set memory overcommit for large model allocations
+      echo 1 > /proc/sys/vm/overcommit_memory 2>/dev/null || true
+      
+      # Reduce memory pressure by dropping caches
+      echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+      
+      # Set OOM killer to be more conservative
+      echo 10 > /proc/sys/vm/oom_kill_allocating_task 2>/dev/null || true
+    fi
     
     log "🌡️  Thermal monitoring enabled for RPi4"
   fi
@@ -292,12 +310,65 @@ except Exception as e:
   fi
 }
 
-# --- Setup paths and environments (once) ---
+# --- Setup paths and environments (reuse existing if available) ---
 BASE_TS="$(date -u +'%Y%m%dT%H%M%SZ')"
 ROOT="$(pwd)"
-SETUP_DIR="$ROOT/setup_$BASE_TS"
-VENV_OX="$SETUP_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
-VENV_TFL="$SETUP_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+
+# Check for existing setup directories
+EXISTING_SETUP=""
+if ls "$ROOT"/setup_* >/dev/null 2>&1; then
+  EXISTING_SETUP=$(ls -td "$ROOT"/setup_* | head -1)
+  log "🔍 Found existing setup: $(basename "$EXISTING_SETUP")"
+fi
+
+# Decide whether to reuse existing setup
+REUSE_SETUP=0
+if [ -n "$EXISTING_SETUP" ]; then
+  VENV_OX_EXISTING="$EXISTING_SETUP/.venv_ox"
+  VENV_TFL_EXISTING="$EXISTING_SETUP/.venv_tfl"
+  
+  # Check if required environments exist and are functional
+  ONNX_ENV_OK=0
+  TFLITE_ENV_OK=0
+  
+  if [[ $USE_ONNX -eq 1 ]] && [ -d "$VENV_OX_EXISTING" ]; then
+    if "$VENV_OX_EXISTING/bin/python" -c "import onnxruntime, torchvision.transforms; print('ONNX env OK')" 2>/dev/null; then
+      ONNX_ENV_OK=1
+      log "✓ Existing ONNX environment is functional"
+    fi
+  elif [[ $USE_ONNX -eq 0 ]]; then
+    ONNX_ENV_OK=1  # Not needed
+  fi
+  
+  if [[ $USE_TFLITE -eq 1 ]] && [ -d "$VENV_TFL_EXISTING" ]; then
+    if "$VENV_TFL_EXISTING/bin/python" -c "import tflite_runtime.interpreter; print('TFLite env OK')" 2>/dev/null; then
+      TFLITE_ENV_OK=1
+      log "✓ Existing TFLite environment is functional"
+    fi
+  elif [[ $USE_TFLITE -eq 0 ]]; then
+    TFLITE_ENV_OK=1  # Not needed
+  fi
+  
+  # Reuse if all required environments are OK
+  if [[ $ONNX_ENV_OK -eq 1 && $TFLITE_ENV_OK -eq 1 ]]; then
+    REUSE_SETUP=1
+    SETUP_DIR="$EXISTING_SETUP"
+    VENV_OX="$VENV_OX_EXISTING"
+    VENV_TFL="$VENV_TFL_EXISTING"
+    log "🔄 Reusing existing setup: $(basename "$SETUP_DIR")"
+    log "💡 This saves significant time on RPi4!"
+  else
+    log "⚠️  Existing environments incomplete or broken, creating new setup"
+  fi
+fi
+
+# Create new setup if not reusing
+if [ $REUSE_SETUP -eq 0 ]; then
+  SETUP_DIR="$ROOT/setup_$BASE_TS"
+  VENV_OX="$SETUP_DIR/.venv_ox"    # Torch/ONNX env (numpy > 2)
+  VENV_TFL="$SETUP_DIR/.venv_tfl"  # TFLite/TF env (numpy < 2)
+  log "🆕 Creating new setup: $(basename "$SETUP_DIR")"
+fi
 
 mkdir -p "$SETUP_DIR"
 
@@ -372,6 +443,8 @@ os.environ.update({
   "TF_NUM_INTRAOP_THREADS":"1","TF_NUM_INTEROPTHREADS":"1",
   # ONNX Runtime specific
   "ORT_NUM_THREADS":"1",
+  # RPi4 memory optimization
+  "ORT_DISABLE_ALL_OPTIMIZATION":"1","ONNX_DISABLE_STATIC_ANALYSIS":"1",
   # Deterministic execution
   "PYTHONHASHSEED":"0","CUDA_DETERMINISTIC_OPS":"1","CUBLAS_DETERMINISTIC":"1",
   "CUDA_LAUNCH_BLOCKING":"1","CUBLAS_WORKSPACE_CONFIG":":4096:8",
@@ -574,73 +647,95 @@ install_sysdeps() {
 install_sysdeps
 setup_rpi4_optimizations
 
-# --- Python venvs + deps (setup once, only for requested frameworks)
-if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
-  log "Creating Torch/ONNX env…"
-  python3 -m venv "$VENV_OX"
-  "$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-  "$VENV_OX/bin/pip" install $PIP_OPTS numpy pandas Pillow tqdm odfpy openpyxl
-
-  if [[ $USE_TORCH -eq 1 ]]; then
-    # Torch + torchvision (CPU-only)
-    "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision
-    "$VENV_OX/bin/pip" install $PIP_OPTS timm || true
-  fi
+# --- Python venvs + deps (setup once, only for requested frameworks) ---
+if [ $REUSE_SETUP -eq 1 ]; then
+  log "📦 Skipping package installation - reusing existing environments"
+  log "ONNX env: $VENV_OX"
+  log "TFLite env: $VENV_TFL"
+else
+  log "📦 Creating new Python environments..."
   
-  if [[ $USE_ONNX -eq 1 ]]; then
-    # ONNX stack (CPU-only)
-    log "📦 Installing ONNX Runtime for $ARCH..."
-    if [ $IS_PI -eq 1 ]; then
-      # ARM64-specific ONNX installation
-      "$VENV_OX/bin/pip" install $PIP_OPTS onnx
-      "$VENV_OX/bin/pip" install $PIP_OPTS onnxruntime || {
-        warn "Standard onnxruntime failed on ARM64, trying alternative..."
-        "$VENV_OX/bin/pip" install $PIP_OPTS --no-deps onnxruntime
-      }
-      # Skip onnxsim on ARM64 as it may not be available
-      "$VENV_OX/bin/pip" install $PIP_OPTS onnxsim || warn "onnxsim not available on ARM64"
-    else
-      # Standard x86 installation
-      "$VENV_OX/bin/pip" install $PIP_OPTS onnx onnxruntime onnxsim
-    fi
-    
-    # Verify ONNX installation
-    if "$VENV_OX/bin/python" -c "import onnxruntime; print(f'✓ ONNX Runtime {onnxruntime.__version__} installed')" 2>/dev/null; then
-      log "✓ ONNX Runtime installation verified"
-    else
-      warn "⚠️  ONNX Runtime installation may have issues"
-    fi
-  fi
-fi
+  if [[ $USE_ONNX -eq 1 || $USE_TORCH -eq 1 ]]; then
+    log "Creating Torch/ONNX env…"
+    python3 -m venv "$VENV_OX"
+    "$VENV_OX/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+    "$VENV_OX/bin/pip" install $PIP_OPTS numpy pandas Pillow tqdm odfpy openpyxl
 
-if [[ $USE_TFLITE -eq 1 ]]; then
-  log "Creating TensorFlow Lite env…"
-  python3 -m venv "$VENV_TFL"
-  "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
-  "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
-  
-  # TFLite Runtime installation (ARM64 optimized)
-  log "📱 Installing TensorFlow Lite Runtime for $ARCH..."
-  if [ $IS_PI -eq 1 ]; then
-    log "🔧 RPi4 detected - using ARM64-optimized TFLite runtime"
-    
-    # First try standard tflite-runtime (should have ARM64 wheels)
-    if "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
-      log "✓ TFLite Runtime installed via standard wheels"
-    else
-      warn "Standard TFLite installation failed, trying alternative sources..."
-      # Fallback to TensorFlow's official ARM64 build
-      "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://www.piwheels.org/simple/ tflite-runtime || {
-        warn "⚠️  TFLite Runtime installation failed - may need manual installation"
-      }
+    if [[ $USE_TORCH -eq 1 ]]; then
+      # Torch + torchvision (CPU-only)
+      "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision
+      "$VENV_OX/bin/pip" install $PIP_OPTS timm || true
     fi
     
-    # Verify TFLite installation specifically for ARM64
-    if "$VENV_TFL/bin/python" -c "import tflite_runtime.interpreter as tflite; print('✓ TFLite Runtime installed successfully for ARM64')" 2>/dev/null; then
-      log "✅ TFLite Runtime verification successful"
+    if [[ $USE_ONNX -eq 1 ]]; then
+      # ONNX stack (CPU-only)
+      log "📦 Installing ONNX Runtime for $ARCH..."
+      if [ $IS_PI -eq 1 ]; then
+        # ARM64-specific ONNX installation
+        "$VENV_OX/bin/pip" install $PIP_OPTS onnx
+        "$VENV_OX/bin/pip" install $PIP_OPTS onnxruntime || {
+          warn "Standard onnxruntime failed on ARM64, trying alternative..."
+          "$VENV_OX/bin/pip" install $PIP_OPTS --no-deps onnxruntime
+        }
+        # Skip onnxsim on ARM64 as it may not be available
+        "$VENV_OX/bin/pip" install $PIP_OPTS onnxsim || warn "onnxsim not available on ARM64"
+        
+        # Install torchvision for ONNX eval script (RPi4 needs this for transforms)
+        log "📦 Installing torchvision for ONNX evaluation..."
+        "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision || {
+          warn "Failed to install torchvision from PyTorch index, trying standard..."
+          "$VENV_OX/bin/pip" install $PIP_OPTS torchvision
+        }
+      else
+        # Standard x86 installation
+        "$VENV_OX/bin/pip" install $PIP_OPTS onnx onnxruntime onnxsim
+        "$VENV_OX/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
+      fi
       
-      # Check for delegation support (RPi4 only supports CPU delegate)
-      "$VENV_TFL/bin/python" -c "
+      # Verify ONNX installation
+      if "$VENV_OX/bin/python" -c "import onnxruntime; print(f'✓ ONNX Runtime {onnxruntime.__version__} installed')" 2>/dev/null; then
+        log "✓ ONNX Runtime installation verified"
+      else
+        warn "⚠️  ONNX Runtime installation may have issues"
+      fi
+      
+      # Verify torchvision for ONNX eval
+      if "$VENV_OX/bin/python" -c "import torchvision.transforms; print('✓ torchvision available for ONNX eval')" 2>/dev/null; then
+        log "✓ torchvision verified for ONNX evaluation"
+      else
+        warn "⚠️  torchvision missing - ONNX evaluation may fail"
+      fi
+    fi
+  fi
+
+  if [[ $USE_TFLITE -eq 1 ]]; then
+    log "Creating TensorFlow Lite env…"
+    python3 -m venv "$VENV_TFL"
+    "$VENV_TFL/bin/python" -m pip install $PIP_OPTS -U pip wheel setuptools
+    "$VENV_TFL/bin/pip" install $PIP_OPTS "numpy<2.0" pandas Pillow tqdm odfpy openpyxl
+    
+    # TFLite Runtime installation (ARM64 optimized)
+    log "📱 Installing TensorFlow Lite Runtime for $ARCH..."
+    if [ $IS_PI -eq 1 ]; then
+      log "🔧 RPi4 detected - using ARM64-optimized TFLite runtime"
+      
+      # First try standard tflite-runtime (should have ARM64 wheels)
+      if "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime; then
+        log "✓ TFLite Runtime installed via standard wheels"
+      else
+        warn "Standard TFLite installation failed, trying alternative sources..."
+        # Fallback to TensorFlow's official ARM64 build
+        "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://www.piwheels.org/simple/ tflite-runtime || {
+          warn "⚠️  TFLite Runtime installation failed - may need manual installation"
+        }
+      fi
+      
+      # Verify TFLite installation specifically for ARM64
+      if "$VENV_TFL/bin/python" -c "import tflite_runtime.interpreter as tflite; print('✓ TFLite Runtime installed successfully for ARM64')" 2>/dev/null; then
+        log "✅ TFLite Runtime verification successful"
+        
+        # Check for delegation support (RPi4 only supports CPU delegate)
+        "$VENV_TFL/bin/python" -c "
 import tflite_runtime.interpreter as tflite
 print('Available TFLite delegates:')
 try:
@@ -650,17 +745,18 @@ except Exception as e:
     print(f'- CPU delegate: Error {e}')
 print('Note: RPi4 VideoCore VI GPU is not supported by TFLite GPU delegate')
 " || true
+      else
+        warn "❌ TFLite Runtime installation verification failed"
+      fi
     else
-      warn "❌ TFLite Runtime installation verification failed"
+      # Standard x86 installation
+      "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
     fi
-  else
-    # Standard x86 installation
-    "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
+    
+    # Add torchvision for transforms (CPU-only)
+    log "📦 Installing torchvision for image transforms..."
+    "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
   fi
-  
-  # Add torchvision for transforms (CPU-only)
-  log "📦 Installing torchvision for image transforms..."
-  "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
 fi
 
 # --- Thermal-aware benchmark execution function ---
@@ -730,6 +826,23 @@ run_benchmark_with_thermal() {
   fi
 }
 
+# Cleanup function for RPi4
+cleanup_rpi4() {
+  if [ $IS_PI -eq 1 ]; then
+    log "🧹 Cleaning up RPi4 optimizations..."
+    
+    # Remove temporary swap if we created it
+    if [ -f /tmp/benchmark_swap ]; then
+      swapoff /tmp/benchmark_swap 2>/dev/null || true
+      rm -f /tmp/benchmark_swap 2>/dev/null || true
+      log "✓ Temporary swap removed"
+    fi
+    
+    # Reset memory overcommit to default
+    echo 0 > /proc/sys/vm/overcommit_memory 2>/dev/null || true
+  fi
+}
+
 # --- Execute benchmark runs ---
 FAILED_RUNS=0
 SUCCESS_COUNT=0
@@ -767,3 +880,6 @@ else
   warn "❌ All benchmark runs failed!"
   exit 1
 fi
+
+# Cleanup RPi4 optimizations
+cleanup_rpi4
