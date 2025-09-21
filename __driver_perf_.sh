@@ -846,8 +846,12 @@ with open('$RES_DIR/perf_results.json', 'w') as f:
     CPU_TFLOPS=$(echo "$CPU_SGEMM_JSON" | python3 -c "
 import json, sys
 try:
-    data = json.load(sys.stdin) if sys.stdin.read().strip() else {}
-    print(data.get('best_tflops', 0.0))
+    input_text = sys.stdin.read().strip()
+    if input_text:
+        data = json.loads(input_text)
+        print(data.get('best_tflops', 0.0))
+    else:
+        print('0.0')
 except:
     print('0.0')
 " 2>/dev/null || echo "0.0")
@@ -942,8 +946,12 @@ with open('$RES_DIR/perf_results.json', 'w') as f:
       GPU_TFLOPS=$(echo "$GPU_SGEMM_JSON" | python3 -c "
 import json, sys
 try:
-    data = json.load(sys.stdin) if sys.stdin.read().strip() else {}
-    print(data.get('best_tflops', 0.0))
+    input_text = sys.stdin.read().strip()
+    if input_text:
+        data = json.loads(input_text)
+        print(data.get('best_tflops', 0.0))
+    else:
+        print('0.0')
 except:
     print('0.0')
 " 2>/dev/null || echo "0.0")
@@ -951,8 +959,12 @@ except:
       GPU_BW=$(echo "$GPU_BW_JSON" | python3 -c "
 import json, sys
 try:
-    data = json.load(sys.stdin) if sys.stdin.read().strip() else {}
-    print(data.get('best_bandwidth_gbs', 0.0))
+    input_text = sys.stdin.read().strip()
+    if input_text:
+        data = json.loads(input_text)
+        print(data.get('best_bandwidth_gbs', 0.0))
+    else:
+        print('0.0')
 except:
     print('0.0')
 " 2>/dev/null || echo "0.0")
