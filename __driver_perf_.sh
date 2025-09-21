@@ -556,7 +556,7 @@ def benchmark_gpu_bandwidth(mbytes=8*1024**3, warmup=3, iters=20):
     # Adaptive memory sizing for OOM safety (use ≤60% of free memory)
     try:
         free_bytes, total_bytes = torch.cuda.mem_get_info()
-        max_safe_bytes = int(0.6 * free_bytes)
+        max_safe_bytes = int(0.2 * free_bytes)
         if mbytes > max_safe_bytes:
             print(f"Reducing GPU memory test from {mbytes//1024**3:.1f} GB to {max_safe_bytes//1024**3:.1f} GB (60% of free memory)")
             mbytes = max_safe_bytes
@@ -782,7 +782,9 @@ with open('$RES_DIR/perf_results.json', 'w') as f:
     }
     
     if [ -f stream ]; then
-      export OMP_NUM_THREADS=$(nproc)
+      if [[ $DETERMINISTIC_MODE -eq 0 ]]; then
+        export OMP_NUM_THREADS=$(nproc)
+      fi
       export OMP_PROC_BIND=close
       export OMP_PLACES=cores
       
