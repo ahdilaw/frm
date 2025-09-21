@@ -109,6 +109,55 @@ log "Frameworks: TFLite=$USE_TFLITE ONNX=$USE_ONNX Torch=$USE_TORCH BLAZE=$BLAZE
 log "OS: $OS_ID $OS_VER | ARCH: $ARCH | ROCm: $HAS_ROCM | RPi: $IS_PI"
 
 # --- RPi4-specific detection and thermal management ---
+cleanup_rpi4_disk_space() {
+  if [ $IS_PI -eq 1 ]; then
+    log "🧹 Cleaning up disk space on RPi4..."
+    
+    # Check available space
+    DISK_AVAIL=$(df / | awk 'NR==2 {print $4}')
+    DISK_AVAIL_MB=$((DISK_AVAIL / 1024))
+    log "Available disk space: ${DISK_AVAIL_MB}MB"
+    
+    if [ $DISK_AVAIL_MB -lt 1000 ]; then
+      warn "⚠️  Low disk space detected! Attempting cleanup..."
+      
+      # Clean package cache
+      apt-get clean 2>/dev/null || true
+      apt-get autoclean 2>/dev/null || true
+      
+      # Clean pip cache
+      rm -rf ~/.cache/pip/* 2>/dev/null || true
+      rm -rf /tmp/pip-* 2>/dev/null || true
+      
+      # Clean old logs
+      find /var/log -name "*.log" -type f -mtime +7 -delete 2>/dev/null || true
+      
+      # Clean old kernels (be careful)
+      apt-get autoremove -y 2>/dev/null || true
+      
+      # Set temporary directory to RAM if available
+      if [ -d /dev/shm ] && [ $(df /dev/shm | awk 'NR==2 {print $4}') -gt 500000 ]; then
+        export TMPDIR=/dev/shm
+        export PIP_CACHE_DIR=/dev/shm/pip_cache
+        mkdir -p $PIP_CACHE_DIR
+        log "✓ Using RAM for temporary files to save disk space"
+      fi
+      
+      # Check space after cleanup
+      DISK_AVAIL_AFTER=$(df / | awk 'NR==2 {print $4}')
+      DISK_AVAIL_AFTER_MB=$((DISK_AVAIL_AFTER / 1024))
+      log "Available space after cleanup: ${DISK_AVAIL_AFTER_MB}MB"
+      
+      if [ $DISK_AVAIL_AFTER_MB -lt 500 ]; then
+        warn "❌ Still very low on disk space (${DISK_AVAIL_AFTER_MB}MB)"
+        warn "Consider expanding SD card or cleaning more files manually"
+        return 1
+      fi
+    fi
+  fi
+  return 0
+}
+
 setup_rpi4_optimizations() {
   if [ $IS_PI -eq 1 ]; then
     log "🔧 Raspberry Pi detected - applying edge optimizations..."
@@ -645,6 +694,7 @@ install_sysdeps() {
   fi
 }
 install_sysdeps
+cleanup_rpi4_disk_space
 setup_rpi4_optimizations
 
 # --- Python venvs + deps (setup once, only for requested frameworks) ---
@@ -753,9 +803,17 @@ print('Note: RPi4 VideoCore VI GPU is not supported by TFLite GPU delegate')
       "$VENV_TFL/bin/pip" install $PIP_OPTS tflite-runtime
     fi
     
-    # Add torchvision for transforms (CPU-only)
-    log "📦 Installing torchvision for image transforms..."
-    "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision
+    # Add torchvision for transforms (CPU-only) - optional for TFLite
+    log "📦 Installing torchvision for image transforms (optional)..."
+    if [ $IS_PI -eq 1 ]; then
+      # On RPi4, torchvision is optional for TFLite - skip if space constrained
+      log "RPi4 detected - skipping torchvision for TFLite (can use PIL transforms)"
+      log "💡 TFLite evaluation will use PIL/OpenCV transforms instead"
+    else
+      "$VENV_TFL/bin/pip" install $PIP_OPTS --extra-index-url https://download.pytorch.org/whl/cpu torchvision || {
+        warn "torchvision installation failed - TFLite eval will use alternative transforms"
+      }
+    fi
   fi
 fi
 

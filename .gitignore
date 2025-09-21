@@ -2,6 +2,7 @@
 data/
 models/
 __scratch.md
+.idea/
 
 # Archive files
 *.tar.gz
