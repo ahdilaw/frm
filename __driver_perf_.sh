@@ -284,27 +284,40 @@ cat > "$SETUP_DIR/stream.c" << 'C'
 #include <stdlib.h>
 #include <omp.h>
 #ifndef N
-#define N (20*1024*1024) // Default: ~20M elements (adaptive sizing via -DN=<value>)
+#define N (20*1024*1024) // overridden by -DN=<value>
 #endif
-double a[N], b[N], c[N];
-int main(){
+
+int main(void){
+  const size_t n = (size_t)N;
+  double *a = NULL, *b = NULL, *c = NULL;
+
+  if (posix_memalign((void**)&a, 64, sizeof(double)*n) ||
+      posix_memalign((void**)&b, 64, sizeof(double)*n) ||
+      posix_memalign((void**)&c, 64, sizeof(double)*n)) {
+    fprintf(stderr, "STREAM: allocation failed for N=%zu\n", n);
+    return 2;
+  }
+
   #pragma omp parallel for
-  for (long i=0;i<N;i++){ b[i]=1.0; c[i]=2.0; }
-  
+  for (size_t i=0;i<n;i++){ b[i]=1.0; c[i]=2.0; }
+
   double best_bw = 0.0;
   for(int k=0;k<15;k++){
     double t0=omp_get_wtime();
     #pragma omp parallel for
-    for (long i=0;i<N;i++) a[i]=b[i]+3.0*c[i]; // STREAM triad
+    for (size_t i=0;i<n;i++) a[i]=b[i]+3.0*c[i]; // STREAM triad
     double t=omp_get_wtime()-t0;
-    // Use 32B accounting (read b, read c, write-allocate read a, write a)
-    // This reflects actual bus traffic on most CPUs without non-temporal stores
-    double bytes = sizeof(double) * 4 * (double)N; // WA + write 
+
+    // 32B accounting: read b, read c, write-allocate read a, write a
+    double bytes = (double)sizeof(double) * 4.0 * (double)n;
     double bw = bytes/t/1e9;
     if (bw > best_bw) best_bw = bw;
     printf("Triad: %.2f GB/s (32B accounting)\n", bw);
   }
   printf("BEST_BW: %.2f\n", best_bw);
+
+  free(a); free(b); free(c);
+  return 0;
 }
 C
 
