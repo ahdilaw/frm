@@ -283,7 +283,9 @@ cat > "$SETUP_DIR/stream.c" << 'C'
 #include <stdio.h>
 #include <stdlib.h>
 #include <omp.h>
-#define N (80*1024*1024) // ~80M elements ~= 305 MB per array
+#ifndef N
+#define N (20*1024*1024) // Default: ~20M elements (adaptive sizing via -DN=<value>)
+#endif
 double a[N], b[N], c[N];
 int main(){
   #pragma omp parallel for
@@ -295,10 +297,12 @@ int main(){
     #pragma omp parallel for
     for (long i=0;i<N;i++) a[i]=b[i]+3.0*c[i]; // STREAM triad
     double t=omp_get_wtime()-t0;
-    double bytes = (sizeof(double)* (1 /*write a*/ + 1 /*read b*/ + 1 /*read c*/)) * (double)N;
+    // Use 32B accounting (read b, read c, write-allocate read a, write a)
+    // This reflects actual bus traffic on most CPUs without non-temporal stores
+    double bytes = sizeof(double) * 4 * (double)N; // WA + write 
     double bw = bytes/t/1e9;
     if (bw > best_bw) best_bw = bw;
-    printf("Triad: %.2f GB/s\n", bw);
+    printf("Triad: %.2f GB/s (32B accounting)\n", bw);
   }
   printf("BEST_BW: %.2f\n", best_bw);
 }
@@ -549,6 +553,16 @@ def benchmark_gpu_bandwidth(mbytes=8*1024**3, warmup=3, iters=20):
     
     device = torch.device("cuda")
     
+    # Adaptive memory sizing for OOM safety (use ≤60% of free memory)
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        max_safe_bytes = int(0.6 * free_bytes)
+        if mbytes > max_safe_bytes:
+            print(f"Reducing GPU memory test from {mbytes//1024**3:.1f} GB to {max_safe_bytes//1024**3:.1f} GB (60% of free memory)")
+            mbytes = max_safe_bytes
+    except Exception as e:
+        print(f"Warning: Could not query GPU memory, using default size: {e}")
+    
     # Record GPU state before benchmark
     clocks_pre = get_gpu_clocks()
     
@@ -738,10 +752,32 @@ with open('$RES_DIR/perf_results.json', 'w') as f:
   if [[ $USE_CPU -eq 1 ]]; then
     log "Running CPU performance benchmarks (run $run_num)…"
     
+    # Set deterministic environment variables if needed
+    if [[ $DETERMINISTIC_MODE -eq 1 ]]; then
+      log "  Applying deterministic mode environment variables..."
+      export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+      export CUDA_LAUNCH_BLOCKING=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONHASHSEED=0
+      export CUDA_DETERMINISTIC_OPS=1 CUBLAS_DETERMINISTIC=1
+    fi
+    
     # Compile and run STREAM Triad
     log "  CPU Memory Bandwidth (STREAM Triad)…"
     cd "$RUN_DIR"
-    gcc -Ofast -march=native -mtune=native -fopenmp stream.c -o stream || {
+    
+    # Calculate adaptive STREAM array size (⅛ of MemTotal for 3 arrays)
+    if [[ -f /proc/meminfo ]]; then
+      MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+      # Formula: N = MemTotal_KB * 1024 / 8 / 3 / 8 (bytes per double)
+      STREAM_N=$((MEM_TOTAL_KB * 1024 / 8 / 3 / 8))
+      # Cap at reasonable bounds (min 1M, max 200M)
+      STREAM_N=$((STREAM_N < 1000000 ? 1000000 : STREAM_N))
+      STREAM_N=$((STREAM_N > 200000000 ? 200000000 : STREAM_N))
+    else
+      STREAM_N=20000000  # Default fallback
+    fi
+    
+    log "  Using STREAM array size N=$STREAM_N (adaptive sizing)"
+    gcc -Ofast -march=native -mtune=native -fopenmp -DN=$STREAM_N stream.c -o stream || {
       warn "Failed to compile STREAM benchmark"
     }
     
@@ -855,7 +891,7 @@ with open('$RES_DIR/perf_results.json', 'w') as f:
         MAX_GR_CLOCK=$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits | head -1 | tr -d ' ')
         MAX_MEM_CLOCK=$(nvidia-smi --query-gpu=clocks.max.memory --format=csv,noheader,nounits | head -1 | tr -d ' ')
         
-        if nvidia-smi -lgc $MAX_GR_CLOCK 2>/dev/null; then
+        if nvidia-smi -lgc $MAX_GR_CLOCK,$MAX_GR_CLOCK 2>/dev/null; then
           log "  ✓ Graphics clock locked to $MAX_GR_CLOCK MHz"
         else
           log "  ⚠ Could not lock graphics clock, using dynamic clocks"
@@ -1035,7 +1071,7 @@ def aggregate_results(result_files):
             "benchmark_type": "cpu_gpu_performance",
             "script_version": "paper-grade",
             "units_specification": {
-                "cpu_memory_bandwidth": "GB/s (STREAM Triad, 1e9 bytes/sec)",
+                "cpu_memory_bandwidth": "GB/s (STREAM Triad, 32B accounting for write-allocate, 1e9 bytes/sec)",
                 "cpu_compute": "GFLOP/s (single-precision SGEMM, best-effort BLAS)",
                 "gpu_memory_bandwidth": "GB/s (device-to-device copy, 1e9 bytes/sec)",
                 "gpu_compute": "TFLOP/s (single-precision SGEMM, FP32-exact or TF32)",
@@ -1043,8 +1079,9 @@ def aggregate_results(result_files):
             },
             "statistical_notes": {
                 "confidence_intervals": "95% confidence intervals based on normal distribution",
-                "best_values": "Maximum observed performance across all runs",
-                "aggregation_method": "Sample statistics across independent benchmark runs"
+                "best_values": "Maximum observed performance across all runs", 
+                "aggregation_method": "Sample statistics across independent benchmark runs",
+                "stream_methodology": "STREAM Triad uses 32-byte accounting (read b, read c, write-allocate read a, write a) to reflect actual bus traffic on CPUs without non-temporal stores"
             }
         },
         "device_info": {},
