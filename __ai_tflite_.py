@@ -2,14 +2,14 @@
 # type: ignore
 # Usage: python __ai_tflite_.py
 
-import os, json, warnings, math
+import os, json, warnings
 import numpy as np
 import tensorflow as tf
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any
 
 warnings.filterwarnings("ignore")
 
-# Constants
+# ===== Constants =====
 DTYPE_SIZES = {
     'float32': 4,
     'float16': 2,
@@ -21,7 +21,7 @@ DTYPE_SIZES = {
 
 KERNEL_CLASSES = {
     1: "Dense GEMM / Standard Conv",
-    2: "Depthwise / Grouped Conv", 
+    2: "Depthwise / Grouped Conv",
     3: "Attention Core (QK^T, softmax, AV)",
     4: "Elementwise / Pointwise",
     5: "Reductions / Pooling / Norms",
@@ -29,57 +29,39 @@ KERNEL_CLASSES = {
     7: "Data Movement / Layout"
 }
 
-# 1) Add these helpers near the top
-import numpy as np
-
+# ===== Helpers (robust to TFLite quirks) =====
 def dtype_name(x) -> str:
     # Works for numpy types (np.float32), dtype objects (np.dtype('float32')), and strings
     try:
         return np.dtype(x).name
     except Exception:
-        return str(x) or "float32"
+        return "float32"
 
 def normalize_shape(s) -> list:
+    # TFLite may give np.ndarray (possibly empty) or include -1 (dynamic)
     if s is None:
         return []
     try:
-        arr = list(s)  # handles np.ndarray or list
+        arr = list(s) if hasattr(s, "__iter__") and not isinstance(s, (str, bytes)) else [int(s)]
     except Exception:
         return []
     out = []
     for v in arr:
         try:
             iv = int(v)
-            out.append(iv if iv > 0 else 1)  # replace -1 or 0 with 1
+            out.append(iv if iv > 0 else 1)   # replace -1/0 with 1 for accounting
         except Exception:
             out.append(1)
     return out
 
-def tensor_bytes(shape, dtype):
-    # Ensure shape is a plain list of ints
-    shape = normalize_shape(shape)   # always returns a list
+def tensor_bytes(shape, dtype) -> int:
+    shape = normalize_shape(shape)      # ALWAYS a Python list now
     if len(shape) == 0:
         return 0
     return int(np.prod(shape)) * DTYPE_SIZES.get(dtype_name(dtype), 4)
 
-# FLOPs calculator (simplified heuristics)
-def conv_flops(params, out_shape):
-    cout, kh, kw, cin = params
-    _, hout, wout, _ = out_shape
-    return 2 * cout * hout * wout * (cin * kh * kw)
-
-def matmul_flops(a_shape, b_shape):
-    if len(a_shape) < 2 or len(b_shape) < 2: return 0
-    M, K = a_shape[-2], a_shape[-1]
-    K2, N = b_shape[-2], b_shape[-1]
-    if K != K2: return 0
-    return 2 * M * N * K
-
-def tensor_bytes(shape, dtype):
-    if not shape: return 0
-    return np.prod(shape) * DTYPE_SIZES.get(dtype, 4)
-
-def analyze_tflite(model_path: str, model_name: str) -> Dict[str, Any]:
+# ===== Very simple FLOPs heuristics (can be upgraded later) =====
+def analyze_tflite(model_path: str, model_name: str) -> Dict[str, Any] | None:
     try:
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
@@ -91,29 +73,41 @@ def analyze_tflite(model_path: str, model_name: str) -> Dict[str, Any]:
     per_class = {cid: {"F_c": 0.0, "U_c": 0.0} for cid in range(1, 8)}
 
     for d in details:
-        shape = d.get('shape')
-        dtype = d.get('dtype')              # could be np.float32 or np.dtype('float32')
-        size_bytes = tensor_bytes(shape, dtype)
+        # Prefer shape_signature (handles dynamic dims); fallback to shape
+        raw_shape = d.get("shape_signature", None)
+        if raw_shape is None or (hasattr(raw_shape, "size") and raw_shape.size == 0):
+            raw_shape = d.get("shape", None)
 
-        op_type = d.get('name', '').lower()
+        dtype = d.get("dtype")
+        size_bytes = tensor_bytes(raw_shape, dtype)
 
-        if 'conv2d' in op_type and 'depthwise' not in op_type:
-            per_class[1]["F_c"] += 50e6
-            per_class[1]["U_c"] += size_bytes
-        elif 'depthwise' in op_type:
+        # NOTE: d['name'] is a tensor name, not strictly an op. Still useful for coarse mapping.
+        op_name = (d.get("name") or "").lower()
+
+        if "depthwise" in op_name:
             per_class[2]["F_c"] += 20e6
             per_class[2]["U_c"] += size_bytes
-        elif 'matmul' in op_type or 'fullyconnected' in op_type:
+        elif "conv2d" in op_name:
+            per_class[1]["F_c"] += 50e6
+            per_class[1]["U_c"] += size_bytes
+        elif ("matmul" in op_name) or ("fullyconnected" in op_name) or ("dense" in op_name):
             per_class[1]["F_c"] += 10e6
             per_class[1]["U_c"] += size_bytes
-        elif any(x in op_type for x in ['add','mul','sub','div','relu','sigmoid','tanh']):
+        elif any(x in op_name for x in ["add","mul","sub","div","relu","prelu","leakyrelu","sigmoid","tanh","gelu","elu","selu","swish","hard_swish"]):
             per_class[4]["F_c"] += 1e6
             per_class[4]["U_c"] += size_bytes
-        elif any(x in op_type for x in ['maxpool','averagepool','reduce','softmax']):
+        elif any(x in op_name for x in ["maxpool","averagepool","avgpool","reduce","mean","sum","softmax","logsoftmax","argmax","argmin","batchnorm","layernorm","instancenorm","groupnorm"]):
             per_class[5]["F_c"] += 2e6
             per_class[5]["U_c"] += size_bytes
-        else:
+        elif any(x in op_name for x in ["gather","scatter","embedding"]):
+            per_class[6]["F_c"] += 5e5
+            per_class[6]["U_c"] += size_bytes
+        elif any(x in op_name for x in ["reshape","transpose","concat","split","slice","pad","squeeze","unsqueeze","flatten","expand","tile","identity","cast","quantize","dequantize"]):
             per_class[7]["F_c"] += 1e5
+            per_class[7]["U_c"] += size_bytes
+        else:
+            # Unknown → count as data movement (very cheap FLOPs; bytes dominate)
+            per_class[7]["F_c"] += 5e4
             per_class[7]["U_c"] += size_bytes
 
     # AI ratios
@@ -127,15 +121,16 @@ def print_results(model_name, per_class):
     print(f"\n=== {model_name} ===")
     print(f"{'CID':<3} | {'Kernel Class':<30} | {'FLOPs (G)':<12} | {'Bytes (MB)':<12} | {'AI (FLOP/B)':<12}")
     print("-" * 85)
-    totalF, totalU = 0, 0
+    totalF, totalU = 0.0, 0.0
     for cid in range(1, 8):
         f, u, ai = per_class[cid]["F_c"], per_class[cid]["U_c"], per_class[cid]["AI_c"]
         print(f"{cid:<3} | {KERNEL_CLASSES[cid]:<30} | {f/1e9:<12.3f} | {u/1e6:<12.3f} | {ai:<12.3f}")
         totalF += f; totalU += u
-    print("-"*85)
+    print("-" * 85)
     print(f"TOT | {'Total':<30} | {totalF/1e9:<12.3f} | {totalU/1e6:<12.3f} | {totalF/max(totalU,1e-9):<12.3f}")
 
 def main():
+    # Point this where your files landed (e.g., "models/tflite" or "models")
     models_dir = "models/tflite"
     output_file = "__ai_tflite_results_.json"
 
@@ -143,15 +138,15 @@ def main():
         print(f"Error: {models_dir} does not exist")
         return
 
-    model_files = [f for f in os.listdir(models_dir) if f.endswith('.tflite')]
+    model_files = [f for f in os.listdir(models_dir) if f.endswith(".tflite")]
     if not model_files:
         print("No .tflite files found")
         return
 
-    all_results = {}
+    all_results: Dict[str, Any] = {}
     for mf in model_files:
         model_path = os.path.join(models_dir, mf)
-        name = mf.replace(".tflite","")
+        name = mf.replace(".tflite", "")
         print(f"\nAnalyzing {mf}")
         res = analyze_tflite(model_path, name)
         if res:
@@ -159,8 +154,11 @@ def main():
             all_results[name] = res
 
     with open(output_file, "w") as f:
-        json.dump({"summary": {"kernel_classes":KERNEL_CLASSES}, "per_model_results": all_results}, f, indent=2)
+        json.dump({"summary": {"kernel_classes": KERNEL_CLASSES},
+                   "per_model_results": all_results}, f, indent=2)
     print(f"\nSaved results to {output_file}")
 
 if __name__ == "__main__":
+    # Optional: quiet TF logs
+    # os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     main()
