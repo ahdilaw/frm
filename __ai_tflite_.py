@@ -40,23 +40,27 @@ def dtype_name(x) -> str:
         return str(x) or "float32"
 
 def normalize_shape(s) -> list:
-    # TFLite uses -1 for dynamic dims; treat as 1 for static accounting
     if s is None:
         return []
-    arr = list(s)
+    try:
+        arr = list(s)  # handles np.ndarray or list
+    except Exception:
+        return []
     out = []
     for v in arr:
         try:
             iv = int(v)
-            out.append(iv if iv > 0 else 1)
+            out.append(iv if iv > 0 else 1)  # replace -1 or 0 with 1
         except Exception:
             out.append(1)
     return out
 
 def tensor_bytes(shape, dtype):
-    # shape can be np.ndarray; dtype can be np.float32, np.dtype('float32'), or 'float32'
-    shape = normalize_shape(shape)
-    return (int(np.prod(shape)) if shape else 0) * DTYPE_SIZES.get(dtype_name(dtype), 4)
+    # Ensure shape is a plain list of ints
+    shape = normalize_shape(shape)   # always returns a list
+    if len(shape) == 0:
+        return 0
+    return int(np.prod(shape)) * DTYPE_SIZES.get(dtype_name(dtype), 4)
 
 # FLOPs calculator (simplified heuristics)
 def conv_flops(params, out_shape):
