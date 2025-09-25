@@ -29,6 +29,35 @@ KERNEL_CLASSES = {
     7: "Data Movement / Layout"
 }
 
+# 1) Add these helpers near the top
+import numpy as np
+
+def dtype_name(x) -> str:
+    # Works for numpy types (np.float32), dtype objects (np.dtype('float32')), and strings
+    try:
+        return np.dtype(x).name
+    except Exception:
+        return str(x) or "float32"
+
+def normalize_shape(s) -> list:
+    # TFLite uses -1 for dynamic dims; treat as 1 for static accounting
+    if s is None:
+        return []
+    arr = list(s)
+    out = []
+    for v in arr:
+        try:
+            iv = int(v)
+            out.append(iv if iv > 0 else 1)
+        except Exception:
+            out.append(1)
+    return out
+
+def tensor_bytes(shape, dtype):
+    # shape can be np.ndarray; dtype can be np.float32, np.dtype('float32'), or 'float32'
+    shape = normalize_shape(shape)
+    return (int(np.prod(shape)) if shape else 0) * DTYPE_SIZES.get(dtype_name(dtype), 4)
+
 # FLOPs calculator (simplified heuristics)
 def conv_flops(params, out_shape):
     cout, kh, kw, cin = params
@@ -58,7 +87,8 @@ def analyze_tflite(model_path: str, model_name: str) -> Dict[str, Any]:
     per_class = {cid: {"F_c": 0.0, "U_c": 0.0} for cid in range(1, 8)}
 
     for d in details:
-        shape, dtype = d['shape'], d['dtype'].name
+        shape = d.get('shape')
+        dtype = d.get('dtype')              # could be np.float32 or np.dtype('float32')
         size_bytes = tensor_bytes(shape, dtype)
 
         op_type = d.get('name', '').lower()
