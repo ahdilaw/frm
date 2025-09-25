@@ -331,7 +331,7 @@ PY
   fi
 
   # --- Common eval flags
-  LAT_FLAGS=(--latency --lat-warmup-batches 0 --lat-repeats-batch 0 --bs 1)
+  LAT_FLAGS=(--latency --lat-warmup-batches 1 --lat-repeats-batch 1 --bs 1)
   MEM_FLAGS=(--mem --mem-sample-hz 200)
   ENERGY_FLAGS=(--energy --energy-sample-hz 200)
 
