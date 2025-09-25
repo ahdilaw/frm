@@ -6,6 +6,7 @@ import os, json, warnings
 import numpy as np
 import tensorflow as tf
 from typing import Dict, Any
+from typing import Optional
 
 warnings.filterwarnings("ignore")
 
@@ -61,7 +62,7 @@ def tensor_bytes(shape, dtype) -> int:
     return int(np.prod(shape)) * DTYPE_SIZES.get(dtype_name(dtype), 4)
 
 # ===== Very simple FLOPs heuristics (can be upgraded later) =====
-def analyze_tflite(model_path: str, model_name: str) -> Dict[str, Any] | None:
+def analyze_tflite(model_path: str, model_name: str) -> Optional[Dict[str, Any]]:
     try:
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
