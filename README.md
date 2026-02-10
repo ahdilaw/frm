@@ -1,5 +1,10 @@
 # FRM: Framework Benchmarking Suite
 
+## Update: This paper is being prepared for NeurIPS 2026.
+
+## Update: If you would want to access the dataset, please see this link: https://drive.google.com/drive/folders/1npLolqfw0QkKEI9E6u7054rep_tvWeFZ?usp=sharing
+Please note that data is shared as per license. Reproduction of this data without permission is protected.
+
 A comprehensive, paper-grade benchmarking suite for evaluating machine learning models across PyTorch, ONNX Runtime, and TensorFlow Lite frameworks.
 
 ## Features
